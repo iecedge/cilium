@@ -287,6 +287,9 @@ enum {
  */
 #define IPSEC_ENDPOINT TC_ACT_OK
 
+/* Return value to indicate that proxy redirection is required */
+#define POLICY_ACT_PROXY_REDIRECT (1 << 16)
+
 /* Cilium error codes, must NOT overlap with TC return codes.
  * These also serve as drop reasons for metrics,
  * where reason > 0 corresponds to -(DROP_*)
@@ -515,7 +518,7 @@ enum {
 #define CT_SERVICE 2
 
 #ifdef ENABLE_NODEPORT
-#define NAT_MIN_EGRESS		NODEPORT_PORT_MIN
+#define NAT_MIN_EGRESS		NODEPORT_PORT_MIN_NAT
 #else
 #define NAT_MIN_EGRESS		EPHERMERAL_MIN
 #endif

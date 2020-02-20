@@ -1,4 +1,4 @@
-// Copyright 2016-2017 Authors of Cilium
+// Copyright 2016-2020 Authors of Cilium
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -18,12 +18,14 @@ import (
 	"fmt"
 	"net"
 	"strings"
+	"time"
 
 	"github.com/cilium/cilium/api/v1/models"
 	ipamapi "github.com/cilium/cilium/api/v1/server/restapi/ipam"
 	"github.com/cilium/cilium/pkg/api"
 	"github.com/cilium/cilium/pkg/cidr"
 	"github.com/cilium/cilium/pkg/datapath"
+	"github.com/cilium/cilium/pkg/defaults"
 	"github.com/cilium/cilium/pkg/ipam"
 	"github.com/cilium/cilium/pkg/logging/logfields"
 	"github.com/cilium/cilium/pkg/node"
@@ -46,7 +48,11 @@ func NewPostIPAMHandler(d *Daemon) ipamapi.PostIpamHandler {
 func (h *postIPAM) Handle(params ipamapi.PostIpamParams) middleware.Responder {
 	family := strings.ToLower(swag.StringValue(params.Family))
 	owner := swag.StringValue(params.Owner)
-	ipv4Result, ipv6Result, err := h.daemon.ipam.AllocateNext(family, owner)
+	var expirationTimeout time.Duration
+	if swag.BoolValue(params.Expiration) {
+		expirationTimeout = defaults.IPAMExpiration
+	}
+	ipv4Result, ipv6Result, err := h.daemon.ipam.AllocateNextWithExpiration(family, owner, expirationTimeout)
 	if err != nil {
 		return api.Error(ipamapi.PostIpamFailureCode, err)
 	}
@@ -59,20 +65,22 @@ func (h *postIPAM) Handle(params ipamapi.PostIpamParams) middleware.Responder {
 	if ipv4Result != nil {
 		resp.Address.IPV4 = ipv4Result.IP.String()
 		resp.IPV4 = &models.IPAMAddressResponse{
-			Cidrs:     ipv4Result.CIDRs,
-			IP:        ipv4Result.IP.String(),
-			MasterMac: ipv4Result.Master,
-			Gateway:   ipv4Result.GatewayIP,
+			Cidrs:          ipv4Result.CIDRs,
+			IP:             ipv4Result.IP.String(),
+			MasterMac:      ipv4Result.Master,
+			Gateway:        ipv4Result.GatewayIP,
+			ExpirationUUID: ipv4Result.ExpirationUUID,
 		}
 	}
 
 	if ipv6Result != nil {
 		resp.Address.IPV6 = ipv6Result.IP.String()
 		resp.IPV6 = &models.IPAMAddressResponse{
-			Cidrs:     ipv6Result.CIDRs,
-			IP:        ipv6Result.IP.String(),
-			MasterMac: ipv6Result.Master,
-			Gateway:   ipv6Result.GatewayIP,
+			Cidrs:          ipv6Result.CIDRs,
+			IP:             ipv6Result.IP.String(),
+			MasterMac:      ipv6Result.Master,
+			Gateway:        ipv6Result.GatewayIP,
+			ExpirationUUID: ipv6Result.ExpirationUUID,
 		}
 	}
 
@@ -110,6 +118,14 @@ func NewDeleteIPAMIPHandler(d *Daemon) ipamapi.DeleteIpamIPHandler {
 }
 
 func (h *deleteIPAMIP) Handle(params ipamapi.DeleteIpamIPParams) middleware.Responder {
+	// Release of an IP that is in use is not allowed
+	if ep := h.daemon.endpointManager.LookupIPv4(params.IP); ep != nil {
+		return api.Error(ipamapi.DeleteIpamIPFailureCode, fmt.Errorf("IP is in use by endpoint %d", ep.ID))
+	}
+	if ep := h.daemon.endpointManager.LookupIPv6(params.IP); ep != nil {
+		return api.Error(ipamapi.DeleteIpamIPFailureCode, fmt.Errorf("IP is in use by endpoint %d", ep.ID))
+	}
+
 	if err := h.daemon.ipam.ReleaseIPString(params.IP); err != nil {
 		return api.Error(ipamapi.DeleteIpamIPFailureCode, err)
 	}
@@ -268,7 +284,6 @@ func (d *Daemon) allocateIPs() error {
 	log.Infof("  Internal-Node IPv4: %s", node.GetInternalIPv4())
 
 	if option.Config.EnableIPv4 {
-		log.Infof("  Cluster IPv4 prefix: %s", node.GetIPv4ClusterRange())
 		log.Infof("  IPv4 allocation prefix: %s", node.GetIPv4AllocRange())
 
 		if c := option.Config.IPv4NativeRoutingCIDR(); c != nil {
@@ -312,8 +327,6 @@ func (d *Daemon) bootstrapIPAM() {
 	// or IPv4 alloc prefix, respectively, retrieved by k8s node annotations.
 	bootstrapStats.ipam.Start()
 	log.Info("Initializing node addressing")
-
-	node.SetIPv4ClusterCidrMaskSize(option.Config.IPv4ClusterCIDRMaskSize)
 
 	if option.Config.IPv4Range != AutoCIDR {
 		allocCIDR, err := cidr.ParseCIDR(option.Config.IPv4Range)

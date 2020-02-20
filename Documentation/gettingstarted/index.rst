@@ -37,7 +37,8 @@ Security Tutorials
    :glob:
 
    http
-   dns 
+   dns
+   tls-visibility
    kafka
    grpc
    elasticsearch
@@ -58,7 +59,6 @@ Advanced Networking
    ipvlan
    encryption
    host-services
-   nodeport
    kubeproxy-free
    kata-gce
    ipam

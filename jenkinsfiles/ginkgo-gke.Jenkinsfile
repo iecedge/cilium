@@ -11,6 +11,7 @@ pipeline {
         TESTDIR="${WORKSPACE}/${PROJ_PATH}/test"
         GOPATH="${WORKSPACE}"
         GKE_KEY=credentials('gke-key')
+        GKE_ZONE="us-west1-a"
     }
 
     options {
@@ -96,7 +97,6 @@ pipeline {
                     }
                     post {
                         unsuccessful {
-                            sh 'cd ${TESTDIR}/gke; ./release-cluster.sh'
                             script {
                                 if  (!currentBuild.displayName.contains('fail')) {
                                     currentBuild.displayName = 'Scaling cluster failed\n' + currentBuild.displayName
@@ -119,12 +119,11 @@ pipeline {
             }
             steps {
                 dir("${TESTDIR}"){
-                    sh 'CILIUM_IMAGE=$(./print-node-ip.sh)/cilium/cilium:latest CILIUM_OPERATOR_IMAGE=$(./print-node-ip.sh)/cilium/operator:latest ginkgo --focus="$(echo ${ghprbCommentBody} | sed -r "s/([^ ]* |^[^ ]*$)//" | sed "s/^$/K8s*/")" -v --failFast=${FAILFAST} -- -cilium.provision=false -cilium.timeout=${GINKGO_TIMEOUT} -cilium.kubeconfig=${TESTDIR}/gke/gke-kubeconfig -cilium.passCLIEnvironment=true -cilium.registry=$(./print-node-ip.sh)'
+                    sh 'K8S_VERSION=$(${TESTDIR}/gke/get-cluster-version.sh) CILIUM_IMAGE=$(./print-node-ip.sh)/cilium/cilium:latest CILIUM_OPERATOR_IMAGE=$(./print-node-ip.sh)/cilium/operator:latest ginkgo --focus="$(echo ${ghprbCommentBody} | sed -r "s/([^ ]* |^[^ ]*$)//" | sed "s/^$/K8s*/")" -v --failFast=${FAILFAST} -- -cilium.provision=false -cilium.timeout=${GINKGO_TIMEOUT} -cilium.kubeconfig=${TESTDIR}/gke/gke-kubeconfig -cilium.passCLIEnvironment=true -cilium.registry=$(./print-node-ip.sh)'
                 }
             }
             post {
                 always {
-                    sh 'cd ${TESTDIR}/gke; ./release-cluster.sh'
                     sh 'cd ${TESTDIR}; ./archive_test_results_eks.sh || true'
                     archiveArtifacts artifacts: 'src/github.com/cilium/cilium/*.zip'
                     junit testDataPublishers: [[$class: 'AttachmentPublisher']], testResults: 'src/github.com/cilium/cilium/test/*.xml'

@@ -1,4 +1,4 @@
-// Copyright 2018-2019 Authors of Cilium
+// Copyright 2018-2020 Authors of Cilium
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -17,8 +17,6 @@ package helpers
 import (
 	"bytes"
 	"context"
-	"crypto/md5"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
@@ -253,6 +251,10 @@ func CreateKubectl(vmName string, log *logrus.Entry) (k *Kubectl) {
 
 	if !res.WasSuccessful() {
 		ginkgoext.Fail(fmt.Sprintf("Cannot connect to k8s cluster, output:\n%s", res.CombineOutput().String()), 1)
+		return nil
+	}
+	if err := k.WaitforPods(LogGathererNamespace, "-l "+logGathererSelector(true), HelperTimeout); err != nil {
+		ginkgoext.Fail(fmt.Sprintf("Failed waiting for log-gatherer pods: %s", err), 1)
 		return nil
 	}
 
@@ -593,8 +595,12 @@ func (kub *Kubectl) GetNodeNameByLabelContext(ctx context.Context, label string)
 
 // GetNodeIPByLabel returns the IP of the node with cilium.io/ci-node=label.
 // An error is returned if a node cannot be found.
-func (kub *Kubectl) GetNodeIPByLabel(label string) (string, error) {
-	filter := `{@.items[*].status.addresses[?(@.type == "InternalIP")].address}`
+func (kub *Kubectl) GetNodeIPByLabel(label string, external bool) (string, error) {
+	ipType := "InternalIP"
+	if external {
+		ipType = "ExternalIP"
+	}
+	filter := `{@.items[*].status.addresses[?(@.type == "` + ipType + `")].address}`
 	res := kub.ExecShort(fmt.Sprintf("%s get nodes -l cilium.io/ci-node=%s -o jsonpath='%s'",
 		KubectlCmd, label, filter))
 	if !res.WasSuccessful() {
@@ -607,6 +613,30 @@ func (kub *Kubectl) GetNodeIPByLabel(label string) (string, error) {
 	}
 
 	return out, nil
+}
+
+func (kub *Kubectl) getIfaceByIPAddr(label string, ipAddr string) (string, error) {
+	nodeName, err := kub.GetNodeNameByLabel(label)
+	if err != nil {
+		return "", fmt.Errorf("Cannot get node by label %q", label)
+	}
+
+	cmd := fmt.Sprintf(
+		`ip -j a s  | jq -r '.[] | select(.addr_info[] | .local == "%s") | .ifname'`,
+		ipAddr)
+	res, err := kub.ExecInHostNetNS(context.TODO(), nodeName, cmd)
+	if err != nil {
+		return "", fmt.Errorf("Failed to exec %q cmd on %q node", cmd, nodeName)
+	}
+	if !res.WasSuccessful() {
+		return "", fmt.Errorf("Failed to exec %q cmd on %q node", cmd, nodeName)
+	}
+	iface := strings.Trim(res.GetStdOut(), "\n")
+	if len(iface) == 0 {
+		return "", fmt.Errorf("No iface with %s addr on %q node", ipAddr, nodeName)
+	}
+
+	return iface, nil
 }
 
 // GetServiceHostPort returns the host and the first port for the given service name.
@@ -808,7 +838,18 @@ func (kub *Kubectl) NamespaceCreate(name string) *CmdRes {
 
 // NamespaceDelete deletes a given Kubernetes namespace
 func (kub *Kubectl) NamespaceDelete(name string) *CmdRes {
+	res := kub.DeleteAllInNamespace(name)
+	if !res.WasSuccessful() {
+		kub.Logger().Infof("Error while deleting all objects from %s ns: %s", name, res.GetError().Error())
+	}
 	return kub.ExecShort(fmt.Sprintf("%s delete namespace %s", KubectlCmd, name))
+}
+
+// DeleteAllInNamespace deletes all k8s objects in a namespace
+func (kub *Kubectl) DeleteAllInNamespace(name string) *CmdRes {
+	// we are getting all namespaced resources from k8s apiserver, and delete all objects of these types in a provided namespace
+	return kub.ExecShort(fmt.Sprintf("%s delete $(%s api-resources --namespaced=true --verbs=delete -o name | tr '\n' ',' | sed -e 's/,$//') -n %s --all",
+		KubectlCmd, KubectlCmd, name))
 }
 
 // WaitforPods waits up until timeout seconds have elapsed for all pods in the
@@ -1338,7 +1379,7 @@ func addIfNotOverwritten(options map[string]string, field, value string) map[str
 	return options
 }
 
-func (kub *Kubectl) generateCiliumYaml(options map[string]string, filename string) error {
+func (kub *Kubectl) overwriteHelmOptions(options map[string]string) error {
 	for key, value := range defaultHelmOptions {
 		options = addIfNotOverwritten(options, key, value)
 	}
@@ -1356,16 +1397,21 @@ func (kub *Kubectl) generateCiliumYaml(options map[string]string, filename strin
 	}
 
 	if !RunsWithKubeProxy() {
-		nodeIP, err := kub.GetNodeIPByLabel(K8s1)
+		nodeIP, err := kub.GetNodeIPByLabel(K8s1, false)
 		if err != nil {
 			return fmt.Errorf("Cannot retrieve Node IP for k8s1: %s", err)
 		}
 
+		privateIface, err := kub.GetPrivateIface()
+		if err != nil {
+			return err
+		}
+
 		opts := map[string]string{
-			"global.nodePort.device":  PrivateIface,
-			"global.nodePort.enabled": "true",
-			"global.k8sServiceHost":   nodeIP,
-			"global.k8sServicePort":   "6443",
+			"global.kubeProxyReplacement": "strict",
+			"global.nodePort.device":      privateIface,
+			"global.k8sServiceHost":       nodeIP,
+			"global.k8sServicePort":       "6443",
 		}
 		for key, value := range opts {
 			options = addIfNotOverwritten(options, key, value)
@@ -1378,7 +1424,14 @@ func (kub *Kubectl) generateCiliumYaml(options map[string]string, filename strin
 			options[k] = v
 		}
 	}
+	return nil
+}
 
+func (kub *Kubectl) generateCiliumYaml(options map[string]string, filename string) error {
+	err := kub.overwriteHelmOptions(options)
+	if err != nil {
+		return err
+	}
 	// TODO GH-8753: Use helm rendering library instead of shelling out to
 	// helm template
 	helmTemplate := kub.GetFilePath(HelmTemplate)
@@ -1390,17 +1443,68 @@ func (kub *Kubectl) generateCiliumYaml(options map[string]string, filename strin
 	return nil
 }
 
-// ciliumInstallHelm installs Cilium with the Helm options provided.
-func (kub *Kubectl) ciliumInstallHelm(filename string, options map[string]string) error {
-	if err := kub.generateCiliumYaml(options, filename); err != nil {
-		return err
+// GetPrivateIface returns an interface name of a netdev which has InternalIP
+// addr.
+// Assumes that all nodes have identical interfaces.
+func (kub *Kubectl) GetPrivateIface() (string, error) {
+	ipAddr, err := kub.GetNodeIPByLabel(K8s1, false)
+	if err != nil {
+		return "", err
+	} else if ipAddr == "" {
+		return "", fmt.Errorf("%s does not have InternalIP", K8s1)
 	}
 
-	res := kub.Apply(ApplyOptions{FilePath: filename, Force: true, Namespace: GetCiliumNamespace(GetCurrentIntegration())})
-	if !res.WasSuccessful() {
-		return res.GetErr("Unable to apply YAML")
+	return kub.getIfaceByIPAddr(K8s1, ipAddr)
+}
+
+// GetPublicIface returns an interface name of a netdev which has ExternalIP
+// addr.
+// Assumes that all nodes have identical interfaces.
+func (kub *Kubectl) GetPublicIface() (string, error) {
+	ipAddr, err := kub.GetNodeIPByLabel(K8s1, true)
+	if err != nil {
+		return "", err
+	} else if ipAddr == "" {
+		return "", fmt.Errorf("%s does not have ExternalIP", K8s1)
 	}
 
+	return kub.getIfaceByIPAddr(K8s1, ipAddr)
+}
+
+func (kub *Kubectl) DeleteCiliumDS() error {
+	// Do not assert on success in AfterEach intentionally to avoid
+	// incomplete teardown.
+
+	_ = kub.DeleteResource("ds", fmt.Sprintf("-n %s cilium", GetCiliumNamespace(GetCurrentIntegration())))
+	return kub.waitToDeleteCilium()
+}
+
+func (kub *Kubectl) waitToDeleteCilium() error {
+	var (
+		pods []string
+		err  error
+	)
+
+	ctx, cancel := context.WithTimeout(context.Background(), HelperTimeout)
+	defer cancel()
+
+	status := 1
+	for status > 0 {
+
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("timed out waiting to delete Cilium: pods still remaining: %s", pods)
+		default:
+		}
+
+		pods, err = kub.GetCiliumPodsContext(ctx, GetCiliumNamespace(GetCurrentIntegration()))
+		status := len(pods)
+		kub.Logger().Infof("Cilium pods terminating '%d' err='%v' pods='%v'", status, err, pods)
+		if status == 0 {
+			return nil
+		}
+		time.Sleep(1 * time.Second)
+	}
 	return nil
 }
 
@@ -1420,7 +1524,41 @@ func (kub *Kubectl) ciliumUninstallHelm(filename string, options map[string]stri
 
 // CiliumInstall installs Cilium with the provided Helm options.
 func (kub *Kubectl) CiliumInstall(filename string, options map[string]string) error {
-	return kub.ciliumInstallHelm(filename, options)
+	if err := kub.generateCiliumYaml(options, filename); err != nil {
+		return err
+	}
+
+	// Remove cilium DS to ensure that new instances of cilium-agent are started
+	// for the newly generated ConfigMap. Otherwise, the CM changes will stay
+	// inactive until each cilium-agent has been restarted.
+	if err := kub.DeleteCiliumDS(); err != nil {
+		return err
+	}
+
+	res := kub.Apply(ApplyOptions{FilePath: filename, Force: true, Namespace: GetCiliumNamespace(GetCurrentIntegration())})
+	if !res.WasSuccessful() {
+		return res.GetErr("Unable to apply YAML")
+	}
+
+	return nil
+}
+
+// RunHelm runs the helm command with the given options.
+func (kub *Kubectl) RunHelm(action, repo, helmName, version, namespace string, options map[string]string) (*CmdRes, error) {
+	err := kub.overwriteHelmOptions(options)
+	if err != nil {
+		return nil, err
+	}
+	optionsString := ""
+
+	for k, v := range options {
+		optionsString += fmt.Sprintf(" --set %s=%s ", k, v)
+	}
+
+	return kub.ExecMiddle(fmt.Sprintf("helm %s %s %s "+
+		"--version=%s "+
+		"--namespace=%s "+
+		"%s", action, helmName, repo, version, namespace, optionsString)), nil
 }
 
 // CiliumUninstall uninstalls Cilium with the provided Helm options.
@@ -1502,6 +1640,16 @@ func (kub *Kubectl) CiliumEndpointsStatus(pod string) map[string]string {
 	defer cancel()
 	return kub.CiliumExecContext(ctx, pod, fmt.Sprintf(
 		"cilium endpoint list -o jsonpath='%s'", filter)).KVOutput()
+}
+
+// CiliumEndpointIPv6 returns the IPv6 address of each endpoint which matches
+// the given endpoint selector.
+func (kub *Kubectl) CiliumEndpointIPv6(pod string, endpoint string) map[string]string {
+	filter := `{range [*]}{@.status.external-identifiers.pod-name}{"="}{@.status.networking.addressing[*].ipv6}{"\n"}{end}`
+	ctx, cancel := context.WithTimeout(context.Background(), ShortCommandTimeout)
+	defer cancel()
+	return kub.CiliumExecContext(ctx, pod, fmt.Sprintf(
+		"cilium endpoint get %s -o jsonpath='%s'", endpoint, filter)).KVOutput()
 }
 
 // CiliumEndpointWaitReady waits until all endpoints managed by all Cilium pod
@@ -2750,6 +2898,43 @@ CILIUM_SERVICES:
 	return validateCiliumSvcLB(*ciliumService, ciliumLB)
 }
 
+// CiliumServiceAdd adds the given service on a 'pod' running Cilium
+func (kub *Kubectl) CiliumServiceAdd(pod string, id int64, frontend string, backends []string, svcType, trafficPolicy string) error {
+	var opts []string
+	switch strings.ToLower(svcType) {
+	case "nodeport":
+		opts = append(opts, "--k8s-node-port")
+	case "externalip":
+		opts = append(opts, "--k8s-external")
+	case "clusterip":
+		// this is the default
+	default:
+		return fmt.Errorf("invalid service type: %q", svcType)
+	}
+
+	trafficPolicy = strings.Title(strings.ToLower(trafficPolicy))
+	switch trafficPolicy {
+	case "Cluster", "Local":
+		opts = append(opts, "--k8s-traffic-policy "+trafficPolicy)
+	default:
+		return fmt.Errorf("invalid traffic policy: %q", svcType)
+	}
+
+	optsStr := strings.Join(opts, " ")
+	backendsStr := strings.Join(backends, ",")
+	ctx, cancel := context.WithTimeout(context.Background(), ShortCommandTimeout)
+	defer cancel()
+	return kub.CiliumExecContext(ctx, pod, fmt.Sprintf("cilium service update --id %d --frontend %q --backends %q %s",
+		id, frontend, backendsStr, optsStr)).GetErr("cilium service update")
+}
+
+// CiliumServiceDel deletes the service with 'id' on a 'pod' running Cilium
+func (kub *Kubectl) CiliumServiceDel(pod string, id int64) error {
+	ctx, cancel := context.WithTimeout(context.Background(), ShortCommandTimeout)
+	defer cancel()
+	return kub.CiliumExecContext(ctx, pod, fmt.Sprintf("cilium service delete %d", id)).GetErr("cilium service delete")
+}
+
 // ciliumServicePreFlightCheck checks that k8s service is plumbed correctly
 func (kub *Kubectl) ciliumServicePreFlightCheck() error {
 	ginkgoext.By("Performing Cilium service preflight check")
@@ -2884,6 +3069,11 @@ func (kub *Kubectl) reportMapHost(ctx context.Context, path string, reportCmds m
 	}
 }
 
+// HelmAddCiliumRepo installs the repository that contain Cilium helm charts.
+func (kub *Kubectl) HelmAddCiliumRepo() *CmdRes {
+	return kub.ExecMiddle("helm repo add cilium https://helm.cilium.io")
+}
+
 // HelmTemplate renders given helm template. TODO: use go helm library for that
 func (kub *Kubectl) HelmTemplate(chartDir, namespace, filename string, options map[string]string) *CmdRes {
 	optionsString := ""
@@ -3001,25 +3191,20 @@ func addrsEqual(addr1, addr2 *models.BackendAddress) bool {
 // which is running.
 // Note: Namespaces can only be 63 characters long (to comply with DNS). We
 // ensure that the namespace here is shorter than that, but keep it unique by
-// hashing the complete name.
-func GenerateNamespaceForTest() string {
+// prefixing with timestamp
+func GenerateNamespaceForTest(seed string) string {
 	lowered := strings.ToLower(ginkgoext.CurrentGinkgoTestDescription().FullTestText)
 	// K8s namespaces cannot have spaces or underscores.
 	replaced := strings.Replace(lowered, " ", "", -1)
 	replaced = strings.Replace(replaced, "_", "", -1)
 
-	if len(replaced) <= 63 {
-		return replaced
+	timestamped := time.Now().Format("200601021504") + seed + replaced
+
+	if len(timestamped) <= 63 {
+		return timestamped
 	}
 
-	// We need to shorten the name to <=63 characters
-	// Hash the name, encode it as hex, then put it all together
-	h := md5.Sum(([]byte)(replaced[0:]))
-	hash := hex.EncodeToString(h[:])
-	out := []byte(replaced[:56])
-	out = append(out, []byte("-")...)
-	out = append(out, hash[:6]...)
-	return string(out)
+	return timestamped[:63]
 }
 
 // TimestampFilename appends a "timestamp" to the name. The goal is to make this

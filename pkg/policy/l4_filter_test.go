@@ -19,6 +19,7 @@ package policy
 import (
 	"bytes"
 	"fmt"
+	stdlog "log"
 
 	"github.com/cilium/cilium/pkg/checker"
 	"github.com/cilium/cilium/pkg/identity/cache"
@@ -28,7 +29,6 @@ import (
 	"github.com/cilium/cilium/pkg/testutils/allocator"
 	"github.com/cilium/proxy/go/cilium/api"
 
-	"github.com/op/go-logging"
 	. "gopkg.in/check.v1"
 )
 
@@ -67,8 +67,14 @@ func (p *testPolicyContextType) GetSelectorCache() *SelectorCache {
 	return testSelectorCache
 }
 
-func (p *testPolicyContextType) GetTLSContext(*api.TLSContext) (ca, public, private string, err error) {
-	return "", "", "", fmt.Errorf("Not supported")
+func (p *testPolicyContextType) GetTLSContext(tls *api.TLSContext) (ca, public, private string, err error) {
+	switch tls.Secret.Name {
+	case "tls-cert":
+		return "", "fake public cert", "fake private key", nil
+	case "tls-ca-certs":
+		return "fake CA certs", "", "", nil
+	}
+	return "", "", "", fmt.Errorf("Unknown test secret '%s'", tls.Secret.Name)
 }
 
 func (p *testPolicyContextType) GetEnvoyHTTPRules(*api.L7Rules) (*cilium.HttpNetworkPolicyRules, bool) {
@@ -137,7 +143,7 @@ func (ds *PolicyTestSuite) TestMergeAllowAllL3AndAllowAllL7(c *C) {
 
 	buffer := new(bytes.Buffer)
 	ctx := SearchContext{To: labelsA, Trace: TRACE_VERBOSE}
-	ctx.Logging = logging.NewLogBackend(buffer, "", 0)
+	ctx.Logging = stdlog.New(buffer, "", 0)
 
 	l4IngressPolicy, err := repo.ResolveL4IngressPolicy(&ctx)
 	c.Assert(err, IsNil)
@@ -149,10 +155,10 @@ func (ds *PolicyTestSuite) TestMergeAllowAllL3AndAllowAllL7(c *C) {
 	c.Assert(filter.Port, Equals, 80)
 	c.Assert(filter.Ingress, Equals, true)
 
-	c.Assert(filter.CachedSelectors.SelectsAllEndpoints(), Equals, true)
+	c.Assert(filter.SelectsAllEndpoints(), Equals, true)
 
 	c.Assert(filter.L7Parser, Equals, ParserTypeNone)
-	c.Assert(len(filter.L7RulesPerEp), Equals, 0)
+	c.Assert(len(filter.L7RulesPerSelector), Equals, 1)
 	l4IngressPolicy.Detach(repo.GetSelectorCache())
 
 	// Case1B: implicitly wildcard all endpoints.
@@ -180,7 +186,7 @@ func (ds *PolicyTestSuite) TestMergeAllowAllL3AndAllowAllL7(c *C) {
 
 	buffer = new(bytes.Buffer)
 	ctx = SearchContext{To: labelsA, Trace: TRACE_VERBOSE}
-	ctx.Logging = logging.NewLogBackend(buffer, "", 0)
+	ctx.Logging = stdlog.New(buffer, "", 0)
 
 	l4IngressPolicy, err = repo.ResolveL4IngressPolicy(&ctx)
 	c.Assert(err, IsNil)
@@ -192,10 +198,10 @@ func (ds *PolicyTestSuite) TestMergeAllowAllL3AndAllowAllL7(c *C) {
 	c.Assert(filter.Port, Equals, 80)
 	c.Assert(filter.Ingress, Equals, true)
 
-	c.Assert(filter.CachedSelectors.SelectsAllEndpoints(), Equals, true)
+	c.Assert(filter.SelectsAllEndpoints(), Equals, true)
 
 	c.Assert(filter.L7Parser, Equals, ParserTypeNone)
-	c.Assert(len(filter.L7RulesPerEp), Equals, 0)
+	c.Assert(len(filter.L7RulesPerSelector), Equals, 1)
 	l4IngressPolicy.Detach(repo.GetSelectorCache())
 }
 
@@ -234,7 +240,7 @@ func (ds *PolicyTestSuite) TestMergeAllowAllL3AndShadowedL7(c *C) {
 
 	buffer := new(bytes.Buffer)
 	ctx := SearchContext{To: labelsA, Trace: TRACE_VERBOSE}
-	ctx.Logging = logging.NewLogBackend(buffer, "", 0)
+	ctx.Logging = stdlog.New(buffer, "", 0)
 
 	ingressState := traceState{}
 	res, err := rule1.resolveIngressPolicy(testPolicyContext, &ctx, &ingressState, L4PolicyMap{}, nil)
@@ -243,22 +249,16 @@ func (ds *PolicyTestSuite) TestMergeAllowAllL3AndShadowedL7(c *C) {
 
 	c.Log(buffer)
 
-	// The expected policy contains the L7 Rules below, but in practice
-	// when the policy is being resolved and sent to the proxy, it actually
-	// allows all at L7, based on the first API rule imported above. We
-	// just set the expected set of L7 rules below to include this to match
-	// the current implementation.
 	expected := L4PolicyMap{"80/TCP": &L4Filter{
-		Port:            80,
-		Protocol:        api.ProtoTCP,
-		U8Proto:         6,
-		allowsAllAtL3:   true,
-		CachedSelectors: CachedSelectorSlice{wildcardCachedSelector},
-		L7Parser:        "http",
-		L7RulesPerEp: L7DataMap{
-			wildcardCachedSelector: &PerEpData{
+		Port:     80,
+		Protocol: api.ProtoTCP,
+		U8Proto:  6,
+		wildcard: wildcardCachedSelector,
+		L7Parser: "http",
+		L7RulesPerSelector: L7DataMap{
+			wildcardCachedSelector: &PerSelectorPolicy{
 				L7Rules: api.L7Rules{
-					HTTP: []api.PortRuleHTTP{{Path: "/", Method: "GET"}},
+					HTTP: []api.PortRuleHTTP{{Path: "/", Method: "GET"}, {}},
 				},
 			},
 		},
@@ -303,7 +303,7 @@ func (ds *PolicyTestSuite) TestMergeAllowAllL3AndShadowedL7(c *C) {
 
 	buffer = new(bytes.Buffer)
 	ctx = SearchContext{To: labelsA, Trace: TRACE_VERBOSE}
-	ctx.Logging = logging.NewLogBackend(buffer, "", 0)
+	ctx.Logging = stdlog.New(buffer, "", 0)
 
 	l4IngressPolicy, err := repo.ResolveL4IngressPolicy(&ctx)
 	c.Assert(err, IsNil)
@@ -315,10 +315,10 @@ func (ds *PolicyTestSuite) TestMergeAllowAllL3AndShadowedL7(c *C) {
 	c.Assert(filter.Port, Equals, 80)
 	c.Assert(filter.Ingress, Equals, true)
 
-	c.Assert(filter.CachedSelectors.SelectsAllEndpoints(), Equals, true)
+	c.Assert(filter.SelectsAllEndpoints(), Equals, true)
 
 	c.Assert(filter.L7Parser, Equals, ParserTypeHTTP)
-	c.Assert(len(filter.L7RulesPerEp), Equals, 1)
+	c.Assert(len(filter.L7RulesPerSelector), Equals, 1)
 	l4IngressPolicy.Detach(repo.GetSelectorCache())
 }
 
@@ -359,14 +359,13 @@ func (ds *PolicyTestSuite) TestMergeIdenticalAllowAllL3AndRestrictedL7HTTP(c *C)
 		}}
 
 	expected := L4PolicyMap{"80/TCP": &L4Filter{
-		Port:            80,
-		Protocol:        api.ProtoTCP,
-		U8Proto:         6,
-		allowsAllAtL3:   true,
-		CachedSelectors: CachedSelectorSlice{wildcardCachedSelector},
-		L7Parser:        ParserTypeHTTP,
-		L7RulesPerEp: L7DataMap{
-			wildcardCachedSelector: &PerEpData{
+		Port:     80,
+		Protocol: api.ProtoTCP,
+		U8Proto:  6,
+		wildcard: wildcardCachedSelector,
+		L7Parser: ParserTypeHTTP,
+		L7RulesPerSelector: L7DataMap{
+			wildcardCachedSelector: &PerSelectorPolicy{
 				L7Rules: api.L7Rules{
 					HTTP: []api.PortRuleHTTP{{Path: "/", Method: "GET"}},
 				},
@@ -378,7 +377,7 @@ func (ds *PolicyTestSuite) TestMergeIdenticalAllowAllL3AndRestrictedL7HTTP(c *C)
 
 	buffer := new(bytes.Buffer)
 	ctxToA := SearchContext{To: labelsA, Trace: TRACE_VERBOSE}
-	ctxToA.Logging = logging.NewLogBackend(buffer, "", 0)
+	ctxToA.Logging = stdlog.New(buffer, "", 0)
 	c.Log(buffer)
 
 	state := traceState{}
@@ -437,18 +436,17 @@ func (ds *PolicyTestSuite) TestMergeIdenticalAllowAllL3AndRestrictedL7Kafka(c *C
 
 	buffer := new(bytes.Buffer)
 	ctxToA := SearchContext{To: labelsA, Trace: TRACE_VERBOSE}
-	ctxToA.Logging = logging.NewLogBackend(buffer, "", 0)
+	ctxToA.Logging = stdlog.New(buffer, "", 0)
 	c.Log(buffer)
 
 	expected := L4PolicyMap{"9092/TCP": &L4Filter{
-		Port:            9092,
-		Protocol:        api.ProtoTCP,
-		U8Proto:         6,
-		allowsAllAtL3:   true,
-		CachedSelectors: CachedSelectorSlice{wildcardCachedSelector},
-		L7Parser:        ParserTypeKafka,
-		L7RulesPerEp: L7DataMap{
-			wildcardCachedSelector: &PerEpData{
+		Port:     9092,
+		Protocol: api.ProtoTCP,
+		U8Proto:  6,
+		wildcard: wildcardCachedSelector,
+		L7Parser: ParserTypeKafka,
+		L7RulesPerSelector: L7DataMap{
+			wildcardCachedSelector: &PerSelectorPolicy{
 				L7Rules: api.L7Rules{
 					Kafka: []api.PortRuleKafka{{Topic: "foo"}},
 				},
@@ -516,7 +514,7 @@ func (ds *PolicyTestSuite) TestMergeIdenticalAllowAllL3AndMismatchingParsers(c *
 
 	buffer := new(bytes.Buffer)
 	ctxToA := SearchContext{To: labelsA, Trace: TRACE_VERBOSE}
-	ctxToA.Logging = logging.NewLogBackend(buffer, "", 0)
+	ctxToA.Logging = stdlog.New(buffer, "", 0)
 	c.Log(buffer)
 
 	state := traceState{}
@@ -560,7 +558,7 @@ func (ds *PolicyTestSuite) TestMergeIdenticalAllowAllL3AndMismatchingParsers(c *
 
 	buffer = new(bytes.Buffer)
 	ctxToA = SearchContext{To: labelsA, Trace: TRACE_VERBOSE}
-	ctxToA.Logging = logging.NewLogBackend(buffer, "", 0)
+	ctxToA.Logging = stdlog.New(buffer, "", 0)
 	c.Log(buffer)
 
 	state = traceState{}
@@ -605,7 +603,7 @@ func (ds *PolicyTestSuite) TestMergeIdenticalAllowAllL3AndMismatchingParsers(c *
 
 	buffer = new(bytes.Buffer)
 	ctxToA = SearchContext{To: labelsA, Trace: TRACE_VERBOSE}
-	ctxToA.Logging = logging.NewLogBackend(buffer, "", 0)
+	ctxToA.Logging = stdlog.New(buffer, "", 0)
 	c.Log(buffer)
 
 	err = conflictingParsersIngressRule.Sanitize()
@@ -650,7 +648,7 @@ func (ds *PolicyTestSuite) TestMergeIdenticalAllowAllL3AndMismatchingParsers(c *
 
 	buffer = new(bytes.Buffer)
 	ctxAToC := SearchContext{From: labelsA, To: labelsC, Trace: TRACE_VERBOSE}
-	ctxAToC.Logging = logging.NewLogBackend(buffer, "", 0)
+	ctxAToC.Logging = stdlog.New(buffer, "", 0)
 	c.Log(buffer)
 
 	err = conflictingParsersEgressRule.Sanitize()
@@ -661,6 +659,94 @@ func (ds *PolicyTestSuite) TestMergeIdenticalAllowAllL3AndMismatchingParsers(c *
 	c.Log(buffer)
 	c.Assert(err, Not(IsNil))
 	c.Assert(res, IsNil)
+}
+
+// TLS policies with and without interception
+func (ds *PolicyTestSuite) TestMergeTLSPolicies(c *C) {
+	egressRule := &rule{
+		Rule: api.Rule{
+			EndpointSelector: fooSelector,
+			Egress: []api.EgressRule{
+				{
+					ToEndpoints: []api.EndpointSelector{endpointSelectorA},
+					ToPorts: []api.PortRule{{
+						Ports: []api.PortProtocol{
+							{Port: "443", Protocol: api.ProtoTCP},
+						},
+					}},
+				},
+				{
+					ToEndpoints: []api.EndpointSelector{endpointSelectorC},
+					ToPorts: []api.PortRule{{
+						Ports: []api.PortProtocol{
+							{Port: "443", Protocol: api.ProtoTCP},
+						},
+						TerminatingTLS: &api.TLSContext{
+							Secret: &api.Secret{
+								Name: "tls-cert",
+							},
+						},
+						OriginatingTLS: &api.TLSContext{
+							Secret: &api.Secret{
+								Name: "tls-ca-certs",
+							},
+						},
+						Rules: &api.L7Rules{
+							HTTP: []api.PortRuleHTTP{{}},
+						},
+					}},
+				},
+			},
+		}}
+
+	buffer := new(bytes.Buffer)
+	ctxFromFoo := SearchContext{From: labels.ParseSelectLabelArray("foo"), Trace: TRACE_VERBOSE}
+	ctxFromFoo.Logging = stdlog.New(buffer, "", 0)
+	c.Log(buffer)
+
+	err := egressRule.Sanitize()
+	c.Assert(err, IsNil)
+
+	state := traceState{}
+	res, err := egressRule.resolveEgressPolicy(testPolicyContext, &ctxFromFoo, &state, L4PolicyMap{}, nil)
+	c.Log(buffer)
+	c.Assert(err, IsNil)
+	c.Assert(res, Not(IsNil))
+
+	// Since cachedSelectorA's map entry is 'nil', it will not be redirected to the proxy.
+	expected := L4PolicyMap{"443/TCP": &L4Filter{
+		Port:     443,
+		Protocol: api.ProtoTCP,
+		U8Proto:  6,
+		wildcard: nil,
+		L7Parser: ParserTypeHTTP,
+		L7RulesPerSelector: L7DataMap{
+			cachedSelectorA: nil, // no proxy redirect
+			cachedSelectorC: &PerSelectorPolicy{
+				TerminatingTLS: &TLSContext{
+					CertificateChain: "fake public cert",
+					PrivateKey:       "fake private key",
+				},
+				OriginatingTLS: &TLSContext{
+					TrustedCA: "fake CA certs",
+				},
+				EnvoyHTTPRules:  nil,
+				CanShortCircuit: false,
+				L7Rules: api.L7Rules{
+					HTTP: []api.PortRuleHTTP{{}},
+				},
+			},
+		},
+		Ingress:          false,
+		DerivedFromRules: labels.LabelArrayList{nil, nil},
+	}}
+
+	c.Assert(res, checker.Equals, expected)
+
+	l4Filter := res["443/TCP"]
+	c.Assert(l4Filter, Not(IsNil))
+	c.Assert(l4Filter.L7Parser, Equals, ParserTypeHTTP)
+	log.Infof("res: %v", res)
 }
 
 // Case 6: allow all at L3/L7 in one rule, and select an endpoint and allow all on L7
@@ -693,17 +779,19 @@ func (ds *PolicyTestSuite) TestL3RuleShadowedByL3AllowAll(c *C) {
 
 	buffer := new(bytes.Buffer)
 	ctxToA := SearchContext{To: labelsA, Trace: TRACE_VERBOSE}
-	ctxToA.Logging = logging.NewLogBackend(buffer, "", 0)
+	ctxToA.Logging = stdlog.New(buffer, "", 0)
 	c.Log(buffer)
 
 	expected := L4PolicyMap{"80/TCP": &L4Filter{
-		Port:             80,
-		Protocol:         api.ProtoTCP,
-		U8Proto:          6,
-		allowsAllAtL3:    true,
-		CachedSelectors:  CachedSelectorSlice{wildcardCachedSelector},
-		L7Parser:         ParserTypeNone,
-		L7RulesPerEp:     L7DataMap{},
+		Port:     80,
+		Protocol: api.ProtoTCP,
+		U8Proto:  6,
+		wildcard: wildcardCachedSelector,
+		L7Parser: ParserTypeNone,
+		L7RulesPerSelector: L7DataMap{
+			cachedSelectorA:        nil,
+			wildcardCachedSelector: nil,
+		},
 		Ingress:          true,
 		DerivedFromRules: labels.LabelArrayList{nil, nil},
 	}}
@@ -751,17 +839,19 @@ func (ds *PolicyTestSuite) TestL3RuleShadowedByL3AllowAll(c *C) {
 
 	buffer = new(bytes.Buffer)
 	ctxToA = SearchContext{To: labelsA, Trace: TRACE_VERBOSE}
-	ctxToA.Logging = logging.NewLogBackend(buffer, "", 0)
+	ctxToA.Logging = stdlog.New(buffer, "", 0)
 	c.Log(buffer)
 
 	expected = L4PolicyMap{"80/TCP": &L4Filter{
-		Port:             80,
-		Protocol:         api.ProtoTCP,
-		U8Proto:          6,
-		allowsAllAtL3:    true,
-		CachedSelectors:  CachedSelectorSlice{wildcardCachedSelector},
-		L7Parser:         ParserTypeNone,
-		L7RulesPerEp:     L7DataMap{},
+		Port:     80,
+		Protocol: api.ProtoTCP,
+		U8Proto:  6,
+		wildcard: wildcardCachedSelector,
+		L7Parser: ParserTypeNone,
+		L7RulesPerSelector: L7DataMap{
+			wildcardCachedSelector: nil,
+			cachedSelectorA:        nil,
+		},
 		Ingress:          true,
 		DerivedFromRules: labels.LabelArrayList{nil, nil},
 	}}
@@ -822,18 +912,18 @@ func (ds *PolicyTestSuite) TestL3RuleWithL7RulePartiallyShadowedByL3AllowAll(c *
 
 	buffer := new(bytes.Buffer)
 	ctxToA := SearchContext{To: labelsA, Trace: TRACE_VERBOSE}
-	ctxToA.Logging = logging.NewLogBackend(buffer, "", 0)
+	ctxToA.Logging = stdlog.New(buffer, "", 0)
 	c.Log(buffer)
 
 	expected := L4PolicyMap{"80/TCP": &L4Filter{
-		Port:            80,
-		Protocol:        api.ProtoTCP,
-		U8Proto:         6,
-		allowsAllAtL3:   true,
-		CachedSelectors: CachedSelectorSlice{cachedSelectorA, wildcardCachedSelector},
-		L7Parser:        ParserTypeHTTP,
-		L7RulesPerEp: L7DataMap{
-			cachedSelectorA: &PerEpData{
+		Port:     80,
+		Protocol: api.ProtoTCP,
+		U8Proto:  6,
+		wildcard: wildcardCachedSelector,
+		L7Parser: ParserTypeHTTP,
+		L7RulesPerSelector: L7DataMap{
+			wildcardCachedSelector: nil,
+			cachedSelectorA: &PerSelectorPolicy{
 				L7Rules: api.L7Rules{
 					HTTP: []api.PortRuleHTTP{{Path: "/", Method: "GET"}},
 				},
@@ -893,18 +983,18 @@ func (ds *PolicyTestSuite) TestL3RuleWithL7RulePartiallyShadowedByL3AllowAll(c *
 
 	buffer = new(bytes.Buffer)
 	ctxToA = SearchContext{To: labelsA, Trace: TRACE_VERBOSE}
-	ctxToA.Logging = logging.NewLogBackend(buffer, "", 0)
+	ctxToA.Logging = stdlog.New(buffer, "", 0)
 	c.Log(buffer)
 
 	expected = L4PolicyMap{"80/TCP": &L4Filter{
-		Port:            80,
-		Protocol:        api.ProtoTCP,
-		U8Proto:         6,
-		allowsAllAtL3:   true,
-		CachedSelectors: CachedSelectorSlice{wildcardCachedSelector, cachedSelectorA},
-		L7Parser:        ParserTypeHTTP,
-		L7RulesPerEp: L7DataMap{
-			cachedSelectorA: &PerEpData{
+		Port:     80,
+		Protocol: api.ProtoTCP,
+		U8Proto:  6,
+		wildcard: wildcardCachedSelector,
+		L7Parser: ParserTypeHTTP,
+		L7RulesPerSelector: L7DataMap{
+			wildcardCachedSelector: nil,
+			cachedSelectorA: &PerSelectorPolicy{
 				L7Rules: api.L7Rules{
 					HTTP: []api.PortRuleHTTP{{Path: "/", Method: "GET"}},
 				},
@@ -940,7 +1030,7 @@ func (ds *PolicyTestSuite) TestL3RuleWithL7RuleShadowedByL3AllowAll(c *C) {
 
 	// Case 8A: selects specific endpoint with L7 restrictions rule first, then
 	// rule which selects all endpoints and restricts on the same resource on L7.
-	// L7RulesPerEp contains entries for both endpoints selected in each rule
+	// L7RulesPerSelector contains entries for both endpoints selected in each rule
 	// on L7 restriction.
 	case8Rule := &rule{
 		Rule: api.Rule{
@@ -977,23 +1067,22 @@ func (ds *PolicyTestSuite) TestL3RuleWithL7RuleShadowedByL3AllowAll(c *C) {
 
 	buffer := new(bytes.Buffer)
 	ctxToA := SearchContext{To: labelsA, Trace: TRACE_VERBOSE}
-	ctxToA.Logging = logging.NewLogBackend(buffer, "", 0)
+	ctxToA.Logging = stdlog.New(buffer, "", 0)
 	c.Log(buffer)
 
 	expected := L4PolicyMap{"80/TCP": &L4Filter{
-		Port:            80,
-		Protocol:        api.ProtoTCP,
-		U8Proto:         6,
-		allowsAllAtL3:   true,
-		CachedSelectors: CachedSelectorSlice{cachedSelectorA, wildcardCachedSelector},
-		L7Parser:        ParserTypeHTTP,
-		L7RulesPerEp: L7DataMap{
-			wildcardCachedSelector: &PerEpData{
+		Port:     80,
+		Protocol: api.ProtoTCP,
+		U8Proto:  6,
+		wildcard: wildcardCachedSelector,
+		L7Parser: ParserTypeHTTP,
+		L7RulesPerSelector: L7DataMap{
+			wildcardCachedSelector: &PerSelectorPolicy{
 				L7Rules: api.L7Rules{
 					HTTP: []api.PortRuleHTTP{{Path: "/", Method: "GET"}},
 				},
 			},
-			cachedSelectorA: &PerEpData{
+			cachedSelectorA: &PerSelectorPolicy{
 				L7Rules: api.L7Rules{
 					HTTP: []api.PortRuleHTTP{{Path: "/", Method: "GET"}},
 				},
@@ -1022,7 +1111,7 @@ func (ds *PolicyTestSuite) TestL3RuleWithL7RuleShadowedByL3AllowAll(c *C) {
 
 	// Case 8B: first insert rule which selects all endpoints and restricts on
 	// the same resource on L7. Then, insert rule which  selects specific endpoint
-	// with L7 restrictions rule. L7RulesPerEp contains entries for both
+	// with L7 restrictions rule. L7RulesPerSelector contains entries for both
 	// endpoints selected in each rule on L7 restriction.
 	case8Rule = &rule{
 		Rule: api.Rule{
@@ -1059,23 +1148,21 @@ func (ds *PolicyTestSuite) TestL3RuleWithL7RuleShadowedByL3AllowAll(c *C) {
 
 	buffer = new(bytes.Buffer)
 	ctxToA = SearchContext{To: labelsA, Trace: TRACE_VERBOSE}
-	ctxToA.Logging = logging.NewLogBackend(buffer, "", 0)
-	c.Log(buffer)
+	ctxToA.Logging = stdlog.New(buffer, "", 0)
 
 	expected = L4PolicyMap{"80/TCP": &L4Filter{
-		Port:            80,
-		Protocol:        api.ProtoTCP,
-		U8Proto:         6,
-		allowsAllAtL3:   true,
-		CachedSelectors: CachedSelectorSlice{wildcardCachedSelector, cachedSelectorA},
-		L7Parser:        ParserTypeHTTP,
-		L7RulesPerEp: L7DataMap{
-			wildcardCachedSelector: &PerEpData{
+		Port:     80,
+		Protocol: api.ProtoTCP,
+		U8Proto:  6,
+		wildcard: wildcardCachedSelector,
+		L7Parser: ParserTypeHTTP,
+		L7RulesPerSelector: L7DataMap{
+			wildcardCachedSelector: &PerSelectorPolicy{
 				L7Rules: api.L7Rules{
 					HTTP: []api.PortRuleHTTP{{Path: "/", Method: "GET"}},
 				},
 			},
-			cachedSelectorA: &PerEpData{
+			cachedSelectorA: &PerSelectorPolicy{
 				L7Rules: api.L7Rules{
 					HTTP: []api.PortRuleHTTP{{Path: "/", Method: "GET"}},
 				},
@@ -1087,6 +1174,7 @@ func (ds *PolicyTestSuite) TestL3RuleWithL7RuleShadowedByL3AllowAll(c *C) {
 
 	state = traceState{}
 	res, err = case8Rule.resolveIngressPolicy(testPolicyContext, &ctxToA, &state, L4PolicyMap{}, nil)
+	c.Log(buffer)
 	c.Assert(err, IsNil)
 	c.Assert(res, Not(IsNil))
 	c.Assert(res, checker.Equals, expected)
@@ -1144,7 +1232,7 @@ func (ds *PolicyTestSuite) TestL3SelectingEndpointAndL3AllowAllMergeConflictingL
 
 	buffer := new(bytes.Buffer)
 	ctxToA := SearchContext{To: labelsA, Trace: TRACE_VERBOSE}
-	ctxToA.Logging = logging.NewLogBackend(buffer, "", 0)
+	ctxToA.Logging = stdlog.New(buffer, "", 0)
 	c.Log(buffer)
 
 	state := traceState{}
@@ -1195,7 +1283,7 @@ func (ds *PolicyTestSuite) TestL3SelectingEndpointAndL3AllowAllMergeConflictingL
 
 	buffer = new(bytes.Buffer)
 	ctxToA = SearchContext{To: labelsA, Trace: TRACE_VERBOSE}
-	ctxToA.Logging = logging.NewLogBackend(buffer, "", 0)
+	ctxToA.Logging = stdlog.New(buffer, "", 0)
 	c.Log(buffer)
 
 	state = traceState{}
@@ -1250,22 +1338,22 @@ func (ds *PolicyTestSuite) TestMergingWithDifferentEndpointsSelectedAllowSameL7(
 
 	buffer := new(bytes.Buffer)
 	ctxToA := SearchContext{To: labelsA, Trace: TRACE_VERBOSE}
-	ctxToA.Logging = logging.NewLogBackend(buffer, "", 0)
+	ctxToA.Logging = stdlog.New(buffer, "", 0)
 	c.Log(buffer)
 
 	expected := L4PolicyMap{"80/TCP": &L4Filter{
-		Port:            80,
-		Protocol:        api.ProtoTCP,
-		U8Proto:         6,
-		CachedSelectors: CachedSelectorSlice{cachedSelectorA, cachedSelectorC},
-		L7Parser:        ParserTypeHTTP,
-		L7RulesPerEp: L7DataMap{
-			cachedSelectorC: &PerEpData{
+		Port:     80,
+		Protocol: api.ProtoTCP,
+		U8Proto:  6,
+		wildcard: nil,
+		L7Parser: ParserTypeHTTP,
+		L7RulesPerSelector: L7DataMap{
+			cachedSelectorC: &PerSelectorPolicy{
 				L7Rules: api.L7Rules{
 					HTTP: []api.PortRuleHTTP{{Path: "/", Method: "GET"}},
 				},
 			},
-			cachedSelectorA: &PerEpData{
+			cachedSelectorA: &PerSelectorPolicy{
 				L7Rules: api.L7Rules{
 					HTTP: []api.PortRuleHTTP{{Path: "/", Method: "GET"}},
 				},
@@ -1287,7 +1375,7 @@ func (ds *PolicyTestSuite) TestMergingWithDifferentEndpointsSelectedAllowSameL7(
 
 	buffer = new(bytes.Buffer)
 	ctxToC := SearchContext{To: labelsC, Trace: TRACE_VERBOSE}
-	ctxToC.Logging = logging.NewLogBackend(buffer, "", 0)
+	ctxToC.Logging = stdlog.New(buffer, "", 0)
 	c.Log(buffer)
 
 	state = traceState{}
@@ -1326,16 +1414,19 @@ func (ds *PolicyTestSuite) TestMergingWithDifferentEndpointSelectedAllowAllL7(c 
 
 	buffer := new(bytes.Buffer)
 	ctxToA := SearchContext{To: labelsA, Trace: TRACE_VERBOSE}
-	ctxToA.Logging = logging.NewLogBackend(buffer, "", 0)
+	ctxToA.Logging = stdlog.New(buffer, "", 0)
 	c.Log(buffer)
 
 	expected := L4PolicyMap{"80/TCP": &L4Filter{
-		Port:             80,
-		Protocol:         api.ProtoTCP,
-		U8Proto:          6,
-		CachedSelectors:  CachedSelectorSlice{cachedSelectorA, cachedSelectorC},
-		L7Parser:         ParserTypeNone,
-		L7RulesPerEp:     L7DataMap{},
+		Port:     80,
+		Protocol: api.ProtoTCP,
+		U8Proto:  6,
+		wildcard: nil,
+		L7Parser: ParserTypeNone,
+		L7RulesPerSelector: L7DataMap{
+			cachedSelectorA: nil,
+			cachedSelectorC: nil,
+		},
 		Ingress:          true,
 		DerivedFromRules: labels.LabelArrayList{nil, nil},
 	}}
@@ -1352,7 +1443,7 @@ func (ds *PolicyTestSuite) TestMergingWithDifferentEndpointSelectedAllowAllL7(c 
 
 	buffer = new(bytes.Buffer)
 	ctxToC := SearchContext{To: labelsC, Trace: TRACE_VERBOSE}
-	ctxToC.Logging = logging.NewLogBackend(buffer, "", 0)
+	ctxToC.Logging = stdlog.New(buffer, "", 0)
 	c.Log(buffer)
 
 	state = traceState{}
@@ -1399,24 +1490,21 @@ func (ds *PolicyTestSuite) TestAllowingLocalhostShadowsL7(c *C) {
 
 	buffer := new(bytes.Buffer)
 	ctxToA := SearchContext{To: labelsA, Trace: TRACE_VERBOSE}
-	ctxToA.Logging = logging.NewLogBackend(buffer, "", 0)
+	ctxToA.Logging = stdlog.New(buffer, "", 0)
 
 	expected := L4PolicyMap{"80/TCP": &L4Filter{
-		Port:            80,
-		Protocol:        api.ProtoTCP,
-		U8Proto:         6,
-		allowsAllAtL3:   true,
-		CachedSelectors: CachedSelectorSlice{wildcardCachedSelector, cachedSelectorHost},
-		L7Parser:        ParserTypeHTTP,
-		L7RulesPerEp: L7DataMap{
-			wildcardCachedSelector: &PerEpData{
+		Port:     80,
+		Protocol: api.ProtoTCP,
+		U8Proto:  6,
+		wildcard: wildcardCachedSelector,
+		L7Parser: ParserTypeHTTP,
+		L7RulesPerSelector: L7DataMap{
+			wildcardCachedSelector: &PerSelectorPolicy{
 				L7Rules: api.L7Rules{
 					HTTP: []api.PortRuleHTTP{{Path: "/", Method: "GET"}},
 				},
 			},
-			cachedSelectorHost: &PerEpData{
-				L7Rules: api.L7Rules{}, // Empty => Allow all
-			},
+			cachedSelectorHost: nil, // no proxy redirect
 		},
 		Ingress:          true,
 		DerivedFromRules: labels.LabelArrayList{nil},
@@ -1436,7 +1524,7 @@ func (ds *PolicyTestSuite) TestAllowingLocalhostShadowsL7(c *C) {
 	// Endpoints not selected by the rule should not match the rule.
 	buffer = new(bytes.Buffer)
 	ctxToC := SearchContext{To: labelsC, Trace: TRACE_VERBOSE}
-	ctxToC.Logging = logging.NewLogBackend(buffer, "", 0)
+	ctxToC.Logging = stdlog.New(buffer, "", 0)
 
 	state = traceState{}
 	res, err = rule.resolveIngressPolicy(testPolicyContext, toFoo, &state, L4PolicyMap{}, nil)
@@ -1461,18 +1549,19 @@ func (ds *PolicyTestSuite) TestEntitiesL3(c *C) {
 
 	buffer := new(bytes.Buffer)
 	ctxFromA := SearchContext{From: labelsA, Trace: TRACE_VERBOSE}
-	ctxFromA.Logging = logging.NewLogBackend(buffer, "", 0)
+	ctxFromA.Logging = stdlog.New(buffer, "", 0)
 	c.Log(buffer)
 
 	expected := L4PolicyMap{"0/ANY": &L4Filter{
-		Port:             0,
-		Protocol:         api.ProtoAny,
-		U8Proto:          0,
-		CachedSelectors:  CachedSelectorSlice{wildcardCachedSelector},
-		L7Parser:         ParserTypeNone,
-		L7RulesPerEp:     L7DataMap{},
+		Port:     0,
+		Protocol: api.ProtoAny,
+		U8Proto:  0,
+		wildcard: wildcardCachedSelector,
+		L7Parser: ParserTypeNone,
+		L7RulesPerSelector: L7DataMap{
+			wildcardCachedSelector: nil,
+		},
 		Ingress:          false,
-		allowsAllAtL3:    true,
 		DerivedFromRules: labels.LabelArrayList{nil},
 	}}
 

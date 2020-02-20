@@ -119,6 +119,7 @@ type MapTypes struct {
 type Features struct {
 	SystemConfig `json:"system_config"`
 	MapTypes     `json:"map_types"`
+	Helpers      map[string][]string `json:"helpers"`
 }
 
 // ProbeManager is a manager of BPF feature checks.
@@ -132,8 +133,10 @@ func NewProbeManager() *ProbeManager {
 	newProbeManager := func() {
 		var features Features
 		out, err := exec.WithTimeout(
-			defaults.ExecTimeout, "bpftool", "-j", "feature").CombinedOutput(
-			log, true)
+			defaults.ExecTimeout, "bpftool", "-j", "feature",
+			"probe", "filter_out",
+			"\\(trace\\|write_user\\)",
+		).CombinedOutput(log, true)
 		if err != nil {
 			log.WithError(err).Fatal("could not run bpftool")
 		}
@@ -198,4 +201,20 @@ func (p *ProbeManager) SystemConfigProbes() error {
 // GetMapTypes returns information about supported BPF map types.
 func (p *ProbeManager) GetMapTypes() *MapTypes {
 	return &p.features.MapTypes
+}
+
+// GetHelpers returns information about available BPF helpers for the given
+// program type.
+// If program type is not found, returns nil.
+func (p *ProbeManager) GetHelpers(prog string) map[string]struct{} {
+	for p, helpers := range p.features.Helpers {
+		if prog+"_available_helpers" == p {
+			ret := map[string]struct{}{}
+			for _, h := range helpers {
+				ret[h] = struct{}{}
+			}
+			return ret
+		}
+	}
+	return nil
 }

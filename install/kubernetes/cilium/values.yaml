@@ -1,6 +1,12 @@
 # Include the cilium-agent DaemonSet
 agent:
   enabled: true
+  # Do not run Cilium agent when running with clean mode. Useful to completely
+  # uninstall Cilium as it will stop Cilium from starting and create artifacts
+  # in the node.
+  sleepAfterInit: false
+  # Keep the deprecated selector labels when deploying Cilium DaemonSet
+  keepDeprecatedLabels: false
 
 # Include the cilium-config ConfigMap
 config:
@@ -104,7 +110,7 @@ global:
     # chainingMode enables chaining on top of other CNI plugins. Possible
     # values:
     #  - none
-    #  - generic-verth
+    #  - generic-veth
     #  - aws-cni
     #  - portmap
     chainingMode: none
@@ -217,15 +223,18 @@ global:
     # interface is the interface to use for encryption
     # interface: eth0
 
-  # hostServices is the configuration for host-facing load-balancing
+  # kubeProxyReplacement enables kube-proxy replacement in Cilium BPF datapath
+  kubeProxyReplacement: "probe"
+
+  # hostServices is the configuration for ClusterIP service handling in host namespace
   hostServices:
-    # enabled enables host-facing load-balancing
+    # enabled enables host reachable functionality
     enabled: false
 
     # protocols is the list of protocols to support
     protocols: tcp,udp
 
-  # nodePort is the nodeport configuration
+  # nodePort is the configuration for NodePort service handling
   nodePort:
     # enabled enables NodePort functionality
     enabled: false
@@ -238,6 +247,11 @@ global:
 
     # dsr enables direct server return for NodePort services
     dsr: false
+
+  # externalIPs is the configuration for ExternalIPs service handling
+  externalIPs:
+    # enabled enables ExternalIPs functionality
+    enabled: false
 
   # flannel is the flannel specific configuration
   flannel:

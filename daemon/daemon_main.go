@@ -29,7 +29,6 @@ import (
 	"github.com/cilium/cilium/api/v1/server"
 	"github.com/cilium/cilium/api/v1/server/restapi"
 	"github.com/cilium/cilium/common"
-	_ "github.com/cilium/cilium/pkg/alignchecker"
 	"github.com/cilium/cilium/pkg/bpf"
 	"github.com/cilium/cilium/pkg/cgroups"
 	"github.com/cilium/cilium/pkg/cleanup"
@@ -37,6 +36,7 @@ import (
 	"github.com/cilium/cilium/pkg/controller"
 	"github.com/cilium/cilium/pkg/datapath/iptables"
 	linuxdatapath "github.com/cilium/cilium/pkg/datapath/linux"
+	"github.com/cilium/cilium/pkg/datapath/linux/probes"
 	"github.com/cilium/cilium/pkg/datapath/maps"
 	"github.com/cilium/cilium/pkg/defaults"
 	"github.com/cilium/cilium/pkg/envoy"
@@ -57,6 +57,7 @@ import (
 	"github.com/cilium/cilium/pkg/pidfile"
 	"github.com/cilium/cilium/pkg/policy"
 	"github.com/cilium/cilium/pkg/pprof"
+	"github.com/cilium/cilium/pkg/probe"
 	"github.com/cilium/cilium/pkg/version"
 
 	"github.com/go-openapi/loads"
@@ -93,6 +94,11 @@ var (
 		Use:   "cilium-agent",
 		Short: "Run the cilium agent",
 		Run: func(cmd *cobra.Command, args []string) {
+			cmdRefDir := viper.GetString(option.CMDRef)
+			if cmdRefDir != "" {
+				genMarkdown(cmd, cmdRefDir)
+				os.Exit(0)
+			}
 			bootstrapStats.earlyInit.Start()
 			initEnv(cmd)
 			bootstrapStats.earlyInit.End(true)
@@ -332,8 +338,8 @@ func init() {
 	flags.String(option.EnablePolicy, option.DefaultEnforcement, "Enable policy enforcement")
 	option.BindEnv(option.EnablePolicy)
 
-	flags.Bool(option.EnableK8sExternalIPs, defaults.EnableK8sExternalIPs, fmt.Sprintf("Enable k8s externalIPs feature (Only enabled in conjunction with %s)", option.EnableNodePort))
-	option.BindEnv(option.EnableK8sExternalIPs)
+	flags.Bool(option.EnableExternalIPs, defaults.EnableExternalIPs, fmt.Sprintf("Enable k8s service externalIPs feature (requires enabling %s)", option.EnableNodePort))
+	option.BindEnv(option.EnableExternalIPs)
 
 	flags.Bool(option.K8sEnableEndpointSlice, defaults.K8sEnableEndpointSlice, "Enables k8s EndpointSlice feature in Cilium if the k8s cluster supports it")
 	option.BindEnv(option.K8sEnableEndpointSlice)
@@ -401,6 +407,7 @@ func init() {
 
 	flags.Int(option.IPv4ClusterCIDRMaskSize, 8, "Mask size for the cluster wide CIDR")
 	option.BindEnv(option.IPv4ClusterCIDRMaskSize)
+	flags.MarkDeprecated(option.IPv4ClusterCIDRMaskSize, "This option is no longer supported and will be removed in v1.9")
 
 	flags.String(option.IPv4Range, AutoCIDR, "Per-node IPv4 endpoint prefix, e.g. 10.16.0.0/16")
 	option.BindEnv(option.IPv4Range)
@@ -451,6 +458,7 @@ func init() {
 
 	flags.Bool(option.KeepBPFTemplates, false, "Do not restore BPF template files from binary")
 	option.BindEnv(option.KeepBPFTemplates)
+	flags.MarkDeprecated(option.KeepBPFTemplates, "This option is no longer supported and will be removed in v1.9")
 
 	flags.String(option.KVStore, "", "Key-value store type")
 	option.BindEnv(option.KVStore)
@@ -480,6 +488,15 @@ func init() {
 
 	flags.StringSlice(option.Labels, []string{}, "List of label prefixes used to determine identity of an endpoint")
 	option.BindEnv(option.Labels)
+
+	flags.String(option.KubeProxyReplacement, option.KubeProxyReplacementPartial, fmt.Sprintf(
+		"auto-enable available features for kube-proxy replacement (%q), "+
+			"or enable only selected features (will panic if any selected feature cannot be enabled) (%q) "+
+			"or enable all features (will panic if any feature cannot be enabled) (%q), "+
+			"or completely disable it (ignores any selected feature) (%q)",
+		option.KubeProxyReplacementProbe, option.KubeProxyReplacementPartial,
+		option.KubeProxyReplacementStrict, option.KubeProxyReplacementDisabled))
+	option.BindEnv(option.KubeProxyReplacement)
 
 	flags.Bool(option.EnableNodePort, false, "Enable NodePort type services by Cilium (beta)")
 	option.BindEnv(option.EnableNodePort)
@@ -706,9 +723,9 @@ func init() {
 	viper.BindPFlags(flags)
 }
 
-// RestoreExecPermissions restores file permissions to 0740 of all files inside
+// restoreExecPermissions restores file permissions to 0740 of all files inside
 // `searchDir` with the given regex `patterns`.
-func RestoreExecPermissions(searchDir string, patterns ...string) error {
+func restoreExecPermissions(searchDir string, patterns ...string) error {
 	fileList := []string{}
 	err := filepath.Walk(searchDir, func(path string, f os.FileInfo, err error) error {
 		for _, pattern := range patterns {
@@ -737,7 +754,7 @@ func initConfig() {
 		os.Exit(0)
 	}
 
-	if option.Config.CMDRefDir != "" {
+	if viper.GetString(option.CMDRef) != "" {
 		return
 	}
 
@@ -790,10 +807,6 @@ func initEnv(cmd *cobra.Command) {
 
 	// Logging should always be bootstrapped first. Do not add any code above this!
 	logging.SetupLogging(option.Config.LogDriver, option.Config.LogOpt, "cilium-agent", option.Config.Debug)
-
-	if option.Config.CMDRefDir != "" {
-		genMarkdown(cmd)
-	}
 
 	option.LogRegisteredOptions(log)
 
@@ -869,20 +882,11 @@ func initEnv(cmd *cobra.Command) {
 	if err := os.MkdirAll(option.Config.LibDir, defaults.RuntimePathRights); err != nil {
 		scopedLog.WithError(err).Fatal("Could not create library directory")
 	}
-	if !option.Config.KeepTemplates {
-		// We need to remove the old probes here as otherwise stale .t tests could
-		// still reside from newer Cilium versions which might break downgrade.
-		if err := os.RemoveAll(filepath.Join(option.Config.BpfDir, "/probes/")); err != nil {
-			scopedLog.WithError(err).Fatal("Could not delete old probes from library directory")
-		}
-		if err := RestoreAssets(option.Config.LibDir, defaults.BpfDir); err != nil {
-			scopedLog.WithError(err).Fatal("Unable to restore agent assets")
-		}
-		// Restore permissions of executable files
-		if err := RestoreExecPermissions(option.Config.LibDir, `.*\.sh`); err != nil {
-			scopedLog.WithError(err).Fatal("Unable to restore agent assets")
-		}
+	// Restore permissions of executable files
+	if err := restoreExecPermissions(option.Config.LibDir, `.*\.sh`); err != nil {
+		scopedLog.WithError(err).Fatal("Unable to restore agent asset permissions")
 	}
+
 	if option.Config.MaxControllerInterval < 0 {
 		scopedLog.Fatalf("Invalid %s value %d", option.MaxCtrlIntervalName, option.Config.MaxControllerInterval)
 	}
@@ -1054,56 +1058,7 @@ func initEnv(cmd *cobra.Command) {
 		}
 	}
 
-	if option.Config.EnableNodePort &&
-		!(option.Config.EnableHostReachableServices &&
-			option.Config.EnableHostServicesTCP && option.Config.EnableHostServicesUDP) {
-		// We enable host reachable services in order to allow
-		// access to node port services from the host.
-		log.Info("Auto-enabling host reachable services for UDP and TCP as required by BPF NodePort.")
-		option.Config.EnableHostReachableServices = true
-		option.Config.EnableHostServicesTCP = true
-		option.Config.EnableHostServicesUDP = true
-	}
-
-	if option.Config.EnableNodePort && option.Config.Device == "undefined" {
-		device, err := linuxdatapath.NodeDeviceNameWithDefaultRoute()
-		if err != nil {
-			log.WithError(err).Fatal("BPF NodePort's external facing device could not be determined. Use --device to specify.")
-		}
-		log.WithField(logfields.Interface, device).
-			Info("Using auto-derived device for BPF node port")
-		option.Config.Device = device
-	}
-
-	if option.Config.EnableHostReachableServices {
-		if option.Config.EnableHostServicesTCP &&
-			(option.Config.EnableIPv4 && bpf.TestDummyProg(bpf.ProgTypeCgroupSockAddr, bpf.BPF_CGROUP_INET4_CONNECT) != nil ||
-				option.Config.EnableIPv6 && bpf.TestDummyProg(bpf.ProgTypeCgroupSockAddr, bpf.BPF_CGROUP_INET6_CONNECT) != nil) {
-			log.Fatal("BPF host reachable services for TCP needs kernel 4.17.0 or newer.")
-		}
-		// NOTE: as host-lb is a hard dependency for NodePort BPF, the following
-		//       probe will catch if the fib_lookup helper is missing (< 4.18),
-		//       which is another hard dependency for NodePort BPF.
-		if option.Config.EnableHostServicesUDP &&
-			(option.Config.EnableIPv4 && bpf.TestDummyProg(bpf.ProgTypeCgroupSockAddr, bpf.BPF_CGROUP_UDP4_RECVMSG) != nil ||
-				option.Config.EnableIPv6 && bpf.TestDummyProg(bpf.ProgTypeCgroupSockAddr, bpf.BPF_CGROUP_UDP6_RECVMSG) != nil) {
-			log.Fatal("BPF host reachable services for UDP needs kernel 4.19.57, 5.1.16, 5.2.0 or newer. If you run an older kernel and only need TCP, then specify: --host-reachable-services-protos=tcp")
-		}
-	}
-
-	if option.Config.EnableNodePort {
-		if option.Config.NodePortMode != "dsr" && option.Config.NodePortMode != "snat" {
-			log.Fatalf("Invalid value for --node-port-mode option: %s", option.Config.NodePortMode)
-		}
-
-		if option.Config.NodePortMode == "dsr" && option.Config.Tunnel != option.TunnelDisabled {
-			log.Fatal("DSR cannot be used with tunnel")
-		}
-	}
-
-	if option.Config.EnableNodePort && option.Config.EnableIPSec {
-		log.Fatal("IPSec cannot be used with NodePort BPF")
-	}
+	initKubeProxyReplacementOptions()
 
 	// If device has been specified, use it to derive better default
 	// allocation prefixes
@@ -1161,7 +1116,8 @@ func (d *Daemon) initKVStore() {
 	// If K8s is enabled we can do the service translation automagically by
 	// looking at services from k8s and retrieve the service IP from that.
 	// This makes cilium to not depend on kube dns to interact with etcd
-	if k8s.IsEnabled() && kvstore.IsEtcdOperator(option.Config.KVStore, option.Config.KVStoreOpt, option.Config.K8sNamespace) {
+	_, isETCDOperator := kvstore.IsEtcdOperator(option.Config.KVStore, option.Config.KVStoreOpt, option.Config.K8sNamespace)
+	if k8s.IsEnabled() && isETCDOperator {
 		// Wait services and endpoints cache are synced with k8s before setting
 		// up etcd so we can perform the name resolution for etcd-operator
 		// to the service IP as well perform the service -> backend IPs for
@@ -1453,4 +1409,152 @@ func (d *Daemon) instantiateAPI() *restapi.CiliumAPI {
 	api.PolicyGetIPHandler = NewGetIPHandler()
 
 	return api
+}
+
+func initKubeProxyReplacementOptions() {
+	if option.Config.KubeProxyReplacement != option.KubeProxyReplacementStrict &&
+		option.Config.KubeProxyReplacement != option.KubeProxyReplacementPartial &&
+		option.Config.KubeProxyReplacement != option.KubeProxyReplacementProbe &&
+		option.Config.KubeProxyReplacement != option.KubeProxyReplacementDisabled {
+		log.Fatalf("Invalid value for --%s: %s", option.KubeProxyReplacement, option.Config.KubeProxyReplacement)
+	}
+
+	if option.Config.DisableK8sServices {
+		if option.Config.KubeProxyReplacement != option.KubeProxyReplacementDisabled {
+			log.Infof("Service handling disabled. Auto-disabling --%s from \"%s\" to \"%s\"",
+				option.KubeProxyReplacement, option.Config.KubeProxyReplacement,
+				option.KubeProxyReplacementDisabled)
+			option.Config.KubeProxyReplacement = option.KubeProxyReplacementDisabled
+		}
+	}
+
+	if option.Config.KubeProxyReplacement == option.KubeProxyReplacementDisabled {
+		log.Infof("Auto-disabling %q, %q, %q features", option.EnableNodePort,
+			option.EnableExternalIPs, option.EnableHostReachableServices)
+
+		option.Config.EnableNodePort = false
+		option.Config.EnableExternalIPs = false
+		option.Config.EnableHostReachableServices = false
+		option.Config.EnableHostServicesTCP = false
+		option.Config.EnableHostServicesUDP = false
+		option.Config.DisableK8sServices = true
+
+		return
+	}
+
+	// strict denotes to panic if any to-be enabled feature cannot be enabled
+	strict := option.Config.KubeProxyReplacement != option.KubeProxyReplacementProbe
+
+	if option.Config.KubeProxyReplacement == option.KubeProxyReplacementProbe ||
+		option.Config.KubeProxyReplacement == option.KubeProxyReplacementStrict {
+
+		log.Infof("Auto-enabling %q, %q, %q features", option.EnableNodePort,
+			option.EnableExternalIPs, option.EnableHostReachableServices)
+
+		option.Config.EnableNodePort = true
+		option.Config.EnableExternalIPs = true
+		option.Config.EnableHostReachableServices = true
+		option.Config.EnableHostServicesTCP = true
+		option.Config.EnableHostServicesUDP = true
+		option.Config.DisableK8sServices = false
+	}
+
+	if option.Config.EnableNodePort {
+		if option.Config.EnableIPSec {
+			msg := "IPSec cannot be used with NodePort BPF."
+			if strict {
+				log.Fatal(msg)
+			} else {
+				option.Config.EnableNodePort = false
+				option.Config.EnableExternalIPs = false
+				log.Warn(msg + " Disabling the feature.")
+			}
+		}
+
+		if option.Config.NodePortMode != "dsr" && option.Config.NodePortMode != "snat" {
+			log.Fatalf("Invalid value for --%s: %s", option.NodePortMode, option.Config.NodePortMode)
+		}
+
+		if option.Config.NodePortMode == "dsr" && option.Config.Tunnel != option.TunnelDisabled {
+			// Currently, DSR does not work in the tunnel mode. Once it's fixed,
+			// the constraint can be removed.
+			log.Fatal("DSR cannot be used with tunnel")
+		}
+	}
+
+	if option.Config.EnableNodePort {
+		found := false
+		if h := probes.NewProbeManager().GetHelpers("sched_act"); h != nil {
+			if _, ok := h["bpf_fib_lookup"]; ok {
+				found = true
+			}
+		}
+		if !found {
+			msg := "BPF NodePort services needs kernel 4.17.0 or newer."
+			if strict {
+				log.Fatal(msg)
+			} else {
+				log.Warn(msg + " Disabling the feature.")
+				option.Config.EnableNodePort = false
+				option.Config.EnableExternalIPs = false
+			}
+		}
+	}
+
+	if option.Config.EnableNodePort && option.Config.Device == "undefined" {
+		device, err := linuxdatapath.NodeDeviceNameWithDefaultRoute()
+		if err != nil {
+			msg := "BPF NodePort's external facing device could not be determined. Use --device to specify."
+			if strict {
+				log.WithError(err).Fatal(msg)
+			} else {
+				log.WithError(err).Warn(msg + " Disabling BPF NodePort feature.")
+				option.Config.EnableNodePort = false
+				option.Config.EnableExternalIPs = false
+			}
+		} else {
+			log.WithField(logfields.Interface, device).
+				Info("Using auto-derived device for BPF node port")
+			option.Config.Device = device
+		}
+	}
+
+	if option.Config.EnableHostReachableServices {
+		// Try to auto-load IPv6 module if it hasn't been done yet as there can
+		// be v4-in-v6 connections even if the agent has v6 support disabled.
+		probe.HaveIPv6Support()
+
+		if option.Config.EnableHostServicesTCP &&
+			(option.Config.EnableIPv4 && bpf.TestDummyProg(bpf.ProgTypeCgroupSockAddr, bpf.BPF_CGROUP_INET4_CONNECT) != nil ||
+				option.Config.EnableIPv6 && bpf.TestDummyProg(bpf.ProgTypeCgroupSockAddr, bpf.BPF_CGROUP_INET6_CONNECT) != nil) {
+			msg := "BPF host reachable services for TCP needs kernel 4.17.0 or newer."
+			if strict {
+				log.Fatal(msg)
+			} else {
+				option.Config.EnableHostServicesTCP = false
+				log.Warn(msg + " Disabling the feature.")
+			}
+		}
+		if option.Config.EnableHostServicesUDP &&
+			(option.Config.EnableIPv4 && bpf.TestDummyProg(bpf.ProgTypeCgroupSockAddr, bpf.BPF_CGROUP_UDP4_RECVMSG) != nil ||
+				option.Config.EnableIPv6 && bpf.TestDummyProg(bpf.ProgTypeCgroupSockAddr, bpf.BPF_CGROUP_UDP6_RECVMSG) != nil) {
+			msg := "BPF host reachable services for UDP needs kernel 4.19.57, 5.1.16, 5.2.0 or newer. If you run an older kernel and only need TCP, then specify: --host-reachable-services-protos=tcp"
+			if strict {
+				log.Fatal(msg)
+			} else {
+				option.Config.EnableHostServicesUDP = false
+				log.Warn(msg + " Disabling the feature.")
+			}
+		}
+		if !option.Config.EnableHostServicesTCP && !option.Config.EnableHostServicesUDP {
+			option.Config.EnableHostReachableServices = false
+		}
+	} else {
+		option.Config.EnableHostServicesTCP = false
+		option.Config.EnableHostServicesUDP = false
+	}
+
+	if !option.Config.EnableNodePort {
+		option.Config.EnableExternalIPs = false
+	}
 }

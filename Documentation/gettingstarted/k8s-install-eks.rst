@@ -69,6 +69,15 @@ You should see something like this:
 	[...]
 	[✔]  EKS cluster "test-cluster" in "us-west-2" region is ready
 
+Disable the aws-node DaemonSet (EKS only)
+=========================================
+
+If you are running an EKS cluster, disable the ``aws-node`` DaemonSet so it
+does not interfere with the ENIs managed by Cilium:
+
+.. code:: bash
+
+   kubectl -n kube-system set image daemonset/aws-node aws-node=docker.io/spaster/alpine-sleep
 
 Prepare & Deploy Cilium
 =======================
@@ -81,26 +90,12 @@ Deploy Cilium release via Helm:
 
    helm install cilium |CHART_RELEASE| \\
      --namespace kube-system \\
-     --set global.cni.chainingMode=aws-cni \\
-     --set global.masquerade=false \\
+     --set global.eni=true \\
+     --set global.egressMasqueradeInterfaces=eth0 \\
      --set global.tunnel=disabled \\
      --set global.nodeinit.enabled=true
 
-Scale up the cluster
-====================
-
-.. code:: bash
-
-    eksctl get nodegroup --cluster test-cluster
-    CLUSTER			NODEGROUP	CREATED			MIN SIZE	MAX SIZE	DESIRED CAPACITY	INSTANCE TYPE	IMAGE ID
-    test-cluster        	ng-25560078	2019-07-23T06:05:35Z	0		2		0			m5.large	ami-0923e4b35a30a5f53
-
-.. code:: bash
-
-    eksctl scale nodegroup --cluster test-cluster -n ng-25560078 -N 2
-    [ℹ]  scaling nodegroup stack "eksctl-test-cluster-nodegroup-ng-25560078" in cluster eksctl-test-cluster-cluster
-    [ℹ]  scaling nodegroup, desired capacity from 0 to 2
-
+.. include:: aws-scale-up-cluster.rst
 .. include:: k8s-install-validate.rst
 .. include:: hubble-install.rst
 .. include:: getting-started-next-steps.rst

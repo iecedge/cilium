@@ -54,6 +54,7 @@ cilium-agent [flags]
       --egress-masquerade-interfaces string                   Limit egress masquerading to interface selector
       --enable-endpoint-health-checking                       Enable connectivity health checking between virtual endpoints (default true)
       --enable-endpoint-routes                                Use per endpoint routes instead of routing via cilium_host
+      --enable-external-ips                                   Enable k8s service externalIPs feature (requires enabling enable-node-port) (default true)
       --enable-health-checking                                Enable connectivity health checking (default true)
       --enable-host-reachable-services                        Enable reachability of services for host applications (beta)
       --enable-ipsec                                          Enable IPSec support
@@ -61,7 +62,6 @@ cilium-agent [flags]
       --enable-ipv6                                           Enable IPv6 support (default true)
       --enable-k8s-endpoint-slice                             Enables k8s EndpointSlice feature in Cilium if the k8s cluster supports it (default true)
       --enable-k8s-event-handover                             Enable k8s event handover to kvstore for improved scalability
-      --enable-k8s-external-ips                               Enable k8s externalIPs feature (Only enabled in conjunction with enable-node-port) (default true)
       --enable-l7-proxy                                       Enable L7 proxy for L7 policy enforcement (default true)
       --enable-local-node-route                               Enable installation of the route which points the allocation prefix of the local node (default true)
       --enable-node-port                                      Enable NodePort type services by Cilium (beta)
@@ -92,7 +92,6 @@ cilium-agent [flags]
       --ip-allocation-timeout duration                        Time after which an incomplete CIDR allocation is considered failed (default 2m0s)
       --ipam string                                           Backend to use for IPAM
       --ipsec-key-file string                                 Path to IPSec key file
-      --ipv4-cluster-cidr-mask-size int                       Mask size for the cluster wide CIDR (default 8)
       --ipv4-node string                                      IPv4 address of node (default "auto")
       --ipv4-pod-subnets strings                              List of IPv4 pod subnets to preconfigure for encryption
       --ipv4-range string                                     Per-node IPv4 endpoint prefix, e.g. 10.16.0.0/16 (default "auto")
@@ -111,8 +110,8 @@ cilium-agent [flags]
       --k8s-require-ipv6-pod-cidr                             Require IPv6 PodCIDR to be specified in node resource
       --k8s-watcher-endpoint-selector string                  K8s endpoint watcher will watch for these k8s endpoints (default "metadata.name!=kube-scheduler,metadata.name!=kube-controller-manager,metadata.name!=etcd-operator,metadata.name!=gcp-controller-manager")
       --k8s-watcher-queue-size uint                           Queue size used to serialize each k8s event type (default 1024)
-      --keep-bpf-templates                                    Do not restore BPF template files from binary
       --keep-config                                           When restoring state, keeps containers' configuration in place
+      --kube-proxy-replacement string                         auto-enable available features for kube-proxy replacement ("probe"), or enable only selected features (will panic if any selected feature cannot be enabled) ("partial") or enable all features (will panic if any feature cannot be enabled) ("strict"), or completely disable it (ignores any selected feature) ("disabled") (default "partial")
       --kvstore string                                        Key-value store type
       --kvstore-connectivity-timeout duration                 Time after which an incomplete kvstore operation  is considered failed (default 2m0s)
       --kvstore-opt map                                       Key-value store options (default map[])

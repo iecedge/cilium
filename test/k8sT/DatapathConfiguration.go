@@ -40,8 +40,6 @@ var _ = Describe("K8sDatapathConfig", func() {
 		demoDSPath = helpers.ManifestGet(kubectl.BasePath(), "demo_ds.yaml")
 		ipsecDSPath = helpers.ManifestGet(kubectl.BasePath(), "ipsec_ds.yaml")
 		ciliumFilename = helpers.TimestampFilename("cilium.yaml")
-
-		deleteCiliumDS(kubectl)
 	})
 
 	BeforeEach(func() {
@@ -53,9 +51,8 @@ var _ = Describe("K8sDatapathConfig", func() {
 	AfterEach(func() {
 		kubectl.Delete(demoDSPath)
 		kubectl.Delete(ipsecDSPath)
+		kubectl.DeleteCiliumDS()
 		ExpectAllPodsTerminated(kubectl)
-
-		deleteCiliumDS(kubectl)
 	})
 
 	AfterFailed(func() {
@@ -386,11 +383,14 @@ var _ = Describe("K8sDatapathConfig", func() {
 			SkipIfIntegration(helpers.CIIntegrationFlannel)
 			SkipItIfNoKubeProxy()
 
+			privateIface, err := kubectl.GetPrivateIface()
+			Expect(err).Should(BeNil(), "Unable to determine private iface")
+
 			deployCilium(map[string]string{
 				"global.tunnel":               "disabled",
 				"global.autoDirectNodeRoutes": "true",
 				"global.encryption.enabled":   "true",
-				"global.encryption.interface": "enp0s8",
+				"global.encryption.interface": privateIface,
 			})
 			Expect(testPodConnectivityAcrossNodes(kubectl)).Should(BeTrue(), "Connectivity test between nodes failed")
 		})

@@ -1,4 +1,4 @@
-// Copyright 2019 Authors of Cilium
+// Copyright 2019-2020 Authors of Cilium
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -33,7 +33,6 @@ import (
 	"github.com/cilium/cilium/pkg/maps/ctmap"
 	"github.com/cilium/cilium/pkg/maps/encrypt"
 	"github.com/cilium/cilium/pkg/maps/eppolicymap"
-	"github.com/cilium/cilium/pkg/maps/ipcache"
 	ipcachemap "github.com/cilium/cilium/pkg/maps/ipcache"
 	"github.com/cilium/cilium/pkg/maps/lbmap"
 	"github.com/cilium/cilium/pkg/maps/lxcmap"
@@ -185,6 +184,10 @@ func (h *HeaderfileWriter) WriteNodeConfig(w io.Writer, cfg *datapath.LocalNodeC
 		cDefinesMap["ENCRYPT_NODE"] = "1"
 	}
 
+	if !option.Config.DisableK8sServices {
+		cDefinesMap["ENABLE_SERVICES"] = "1"
+	}
+
 	if option.Config.EnableHostReachableServices {
 		if option.Config.EnableHostServicesTCP {
 			cDefinesMap["ENABLE_HOST_SERVICES_TCP"] = "1"
@@ -195,6 +198,28 @@ func (h *HeaderfileWriter) WriteNodeConfig(w io.Writer, cfg *datapath.LocalNodeC
 		if option.Config.EnableHostServicesTCP && option.Config.EnableHostServicesUDP {
 			cDefinesMap["ENABLE_HOST_SERVICES_FULL"] = "1"
 		}
+	}
+
+	if option.Config.EnableNodePort {
+		cDefinesMap["ENABLE_NODEPORT"] = "1"
+
+		if option.Config.EnableIPv4 {
+			cDefinesMap["NODEPORT_NEIGH4"] = "cilium_nodeport_neigh4"
+		}
+		if option.Config.EnableIPv6 {
+			cDefinesMap["NODEPORT_NEIGH6"] = "cilium_nodeport_neigh6"
+		}
+		if option.Config.NodePortMode == "dsr" {
+			cDefinesMap["ENABLE_DSR"] = "1"
+		}
+		if option.Config.EnableExternalIPs {
+			cDefinesMap["ENABLE_EXTERNAL_IP"] = "1"
+		}
+
+		cDefinesMap["NODEPORT_PORT_MIN"] = fmt.Sprintf("%d", option.Config.NodePortMin)
+		cDefinesMap["NODEPORT_PORT_MAX"] = fmt.Sprintf("%d", option.Config.NodePortMax)
+		cDefinesMap["NODEPORT_PORT_MIN_NAT"] = fmt.Sprintf("%d", option.Config.NodePortMax+1)
+		cDefinesMap["NODEPORT_PORT_MAX_NAT"] = "65535"
 	}
 
 	if option.Config.EncryptInterface != "" {
@@ -245,28 +270,6 @@ func (h *HeaderfileWriter) WriteNodeConfig(w io.Writer, cfg *datapath.LocalNodeC
 		ctmap.WriteBPFMacros(fw, nil)
 	}
 
-	if option.Config.EnableNodePort {
-		cDefinesMap["ENABLE_NODEPORT"] = "1"
-		if option.Config.EnableK8sExternalIPs {
-			cDefinesMap["ENABLE_EXTERNAL_IP"] = "1"
-		}
-		cDefinesMap["NODEPORT_PORT_MIN"] = fmt.Sprintf("%d", option.Config.NodePortMin)
-		cDefinesMap["NODEPORT_PORT_MAX"] = fmt.Sprintf("%d", option.Config.NodePortMax)
-		cDefinesMap["NODEPORT_PORT_MIN_NAT"] = fmt.Sprintf("%d", option.Config.NodePortMax+1)
-		cDefinesMap["NODEPORT_PORT_MAX_NAT"] = "65535"
-
-		if option.Config.EnableIPv4 {
-			cDefinesMap["NODEPORT_NEIGH4"] = "cilium_nodeport_neigh4"
-		}
-		if option.Config.EnableIPv6 {
-			cDefinesMap["NODEPORT_NEIGH6"] = "cilium_nodeport_neigh6"
-		}
-
-		if option.Config.NodePortMode == "dsr" {
-			cDefinesMap["ENABLE_DSR"] = "1"
-		}
-	}
-
 	// Since golang maps are unordered, we sort the keys in the map
 	// to get a consistent writtern format to the writer. This maintains
 	// the consistency when we try to calculate hash for a datapath after
@@ -313,7 +316,7 @@ func (h *HeaderfileWriter) writeNetdevConfig(w io.Writer, cfg datapath.DeviceCon
 
 	// In case the Linux kernel doesn't support LPM map type, pass the set
 	// of prefix length for the datapath to lookup the map.
-	if ipcache.IPCache.MapType != bpf.BPF_MAP_TYPE_LPM_TRIE {
+	if !ipcachemap.BackedByLPM() {
 		ipcachePrefixes6, ipcachePrefixes4 := cfg.GetCIDRPrefixLengths()
 
 		fmt.Fprint(w, "#define IPCACHE6_PREFIXES ")

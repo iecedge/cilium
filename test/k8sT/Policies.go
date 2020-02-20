@@ -92,7 +92,6 @@ var _ = Describe("K8sPolicyTest", func() {
 		knpAllowEgress = helpers.ManifestGet(kubectl.BasePath(), "knp-default-allow-egress.yaml")
 		cnpMatchExpression = helpers.ManifestGet(kubectl.BasePath(), "cnp-matchexpressions.yaml")
 
-		deleteCiliumDS(kubectl)
 		DeployCiliumOptionsAndDNS(kubectl, ciliumFilename, map[string]string{
 			"global.tls.secretsBackend": "k8s",
 			"global.debug.verbose":      "flow",
@@ -110,6 +109,7 @@ var _ = Describe("K8sPolicyTest", func() {
 	})
 
 	AfterAll(func() {
+		kubectl.DeleteCiliumDS()
 		ExpectAllPodsTerminated(kubectl)
 		kubectl.CloseSSHClient()
 	})
@@ -167,9 +167,10 @@ var _ = Describe("K8sPolicyTest", func() {
 					"ICMP egress connectivity to 8.8.8.8 from pod %q", pod)
 
 				By("DNS lookup of kubernetes.default.svc.cluster.local")
+				// -R3 retry 3 times, -N1 ndots set to 1, -t A only lookup A records
 				res = kubectl.ExecPodCmd(
 					namespaceForTest, pod,
-					"host -v kubernetes.default.svc.cluster.local")
+					"host -v -R3 -N1 -t A kubernetes.default.svc.cluster.local.")
 
 				// kube-dns is always whitelisted so this should always work
 				ExpectWithOffset(1, res).To(getMatcher(expectWorldSuccess || expectClusterSuccess),
@@ -186,7 +187,7 @@ var _ = Describe("K8sPolicyTest", func() {
 		}
 
 		BeforeAll(func() {
-			namespaceForTest = helpers.GenerateNamespaceForTest()
+			namespaceForTest = helpers.GenerateNamespaceForTest("")
 			kubectl.NamespaceDelete(namespaceForTest)
 			kubectl.NamespaceCreate(namespaceForTest).ExpectSuccess("could not create namespace")
 			kubectl.Apply(helpers.ApplyOptions{FilePath: demoPath, Namespace: namespaceForTest}).ExpectSuccess("could not create resource")
@@ -303,7 +304,7 @@ var _ = Describe("K8sPolicyTest", func() {
 				appPods[helpers.App3], clusterIP)
 		}, 500)
 
-		It("TLS policy", func() {
+		PIt("TLS policy", func() {
 			By("Testing L7 Policy with TLS")
 
 			res := kubectl.CreateSecret("generic", "user-agent", "default", "--from-literal=user-agent=CURRL")
@@ -327,25 +328,25 @@ var _ = Describe("K8sPolicyTest", func() {
 
 			res = kubectl.ExecPodCmd(
 				namespaceForTest, appPods[helpers.App2],
-				helpers.CurlFail("-4 --max-time 15 %s https://swapi.co:443/api/planets/1/", "-v --cacert /cacert.pem"))
+				helpers.CurlFail("--retry 5 -4 --max-time 15 %s https://swapi.co:443/api/planets/1/", "-v --cacert /cacert.pem"))
 			res.ExpectSuccess("Cannot connect from %q to 'https://swapi.co:443/api/planets/1/'",
 				appPods[helpers.App2])
 
 			res = kubectl.ExecPodCmd(
 				namespaceForTest, appPods[helpers.App2],
-				helpers.CurlFail("-4 %s https://swapi.co:443/api/planets/2/", "-v --cacert /cacert.pem"))
+				helpers.CurlFail("--retry 5 -4 %s https://swapi.co:443/api/planets/2/", "-v --cacert /cacert.pem"))
 			res.ExpectFailWithError("403 Forbidden", "Unexpected connection from %q to 'https://swapi.co:443/api/planets/2/'",
 				appPods[helpers.App2])
 
 			res = kubectl.ExecPodCmd(
 				namespaceForTest, appPods[helpers.App2],
-				helpers.CurlFail("-4 %s https://www.lyft.com:443/privacy", "-v --cacert /cacert.pem"))
+				helpers.CurlFail("--retry 5 -4 %s https://www.lyft.com:443/privacy", "-v --cacert /cacert.pem"))
 			res.ExpectSuccess("Cannot connect from %q to 'https://www.lyft.com:443/privacy'",
 				appPods[helpers.App2])
 
 			res = kubectl.ExecPodCmd(
 				namespaceForTest, appPods[helpers.App2],
-				helpers.CurlFail("-4 %s https://www.lyft.com:443/private", "-v --cacert /cacert.pem"))
+				helpers.CurlFail("--retry 5 -4 %s https://www.lyft.com:443/private", "-v --cacert /cacert.pem"))
 			res.ExpectFailWithError("403 Forbidden", "Unexpected connection from %q to 'https://www.lyft.com:443/private'",
 				appPods[helpers.App2])
 		}, 500)
@@ -615,9 +616,10 @@ var _ = Describe("K8sPolicyTest", func() {
 					helpers.Ping("8.8.8.8"))
 				res.ExpectSuccess("Egress ping connectivity should be allowed for pod %q", pod)
 
+				// -R3 retry 3 times, -N1 ndots set to 1, -t A only lookup A records
 				res = kubectl.ExecPodCmd(
 					namespaceForTest, pod,
-					"host kubernetes.default.svc.cluster.local")
+					"host -v -R3 -N1 -t A kubernetes.default.svc.cluster.local.")
 				res.ExpectSuccess("Egress DNS connectivity should be allowed for pod %q", pod)
 			}
 		})
@@ -790,7 +792,7 @@ var _ = Describe("K8sPolicyTest", func() {
 			})
 		})
 
-		Context("Redirects traffic to proxy when no policy is applied with proxy-visibility annotation", func() {
+		Context("Traffic redirections to proxy", func() {
 
 			var (
 				// track which app1 pod we care about, and its corresponding
@@ -1130,11 +1132,12 @@ EOF`, k, v)
 
 		var (
 			err               error
-			secondNS          = "second"
+			secondNS          string
 			appPods           map[string]string
 			appPodsNS         map[string]string
 			clusterIP         string
 			secondNSclusterIP string
+			nsLabel           = "second"
 
 			demoPath           string
 			l3L4Policy         string
@@ -1145,18 +1148,26 @@ EOF`, k, v)
 		)
 
 		BeforeAll(func() {
+			secondNS = helpers.GenerateNamespaceForTest("2")
+
+			cnpSecondNSChart := helpers.ManifestGet(kubectl.BasePath(), "cnp-second-namespaces")
+			cnpSecondNS = helpers.ManifestGet(kubectl.BasePath(), "cnp-second-namespaces.yaml")
+			res := kubectl.HelmTemplate(cnpSecondNSChart, "", cnpSecondNS, map[string]string{
+				"Namespace": secondNS,
+			})
+			res.ExpectSuccess("Unable to render cnp-second-namespace chart")
+
 			demoPath = helpers.ManifestGet(kubectl.BasePath(), "demo.yaml")
 			l3L4Policy = helpers.ManifestGet(kubectl.BasePath(), "l3-l4-policy.yaml")
-			cnpSecondNS = helpers.ManifestGet(kubectl.BasePath(), "cnp-second-namespaces.yaml")
 			netpolNsSelector = fmt.Sprintf("%s -n %s", helpers.ManifestGet(kubectl.BasePath(), "netpol-namespace-selector.yaml"), secondNS)
 			l3l4PolicySecondNS = fmt.Sprintf("%s -n %s", l3L4Policy, secondNS)
 			demoManifest = fmt.Sprintf("%s -n %s", demoPath, secondNS)
 
 			kubectl.NamespaceDelete(secondNS)
-			res := kubectl.NamespaceCreate(secondNS)
+			res = kubectl.NamespaceCreate(secondNS)
 			res.ExpectSuccess("unable to create namespace %q", secondNS)
 
-			res = kubectl.Exec(fmt.Sprintf("kubectl label namespaces/%[1]s nslabel=%[1]s", secondNS))
+			res = kubectl.Exec(fmt.Sprintf("kubectl label namespaces/%s nslabel=%s", secondNS, nsLabel))
 			res.ExpectSuccess("cannot create namespace labels")
 
 			res = kubectl.ApplyDefault(demoManifest)
@@ -1334,8 +1345,8 @@ EOF`, k, v)
 			demoPath        string
 			demoManifestNS1 string
 			demoManifestNS2 string
-			firstNS         = "first"
-			secondNS        = "second"
+			firstNS         string
+			secondNS        string
 
 			appPodsFirstNS  map[string]string
 			appPodsSecondNS map[string]string
@@ -1350,6 +1361,8 @@ EOF`, k, v)
 		)
 
 		BeforeAll(func() {
+			firstNS = helpers.GenerateNamespaceForTest("1")
+			secondNS = helpers.GenerateNamespaceForTest("2")
 			demoPath = helpers.ManifestGet(kubectl.BasePath(), "demo.yaml")
 			egressDenyAllPolicy = helpers.ManifestGet(kubectl.BasePath(), "ccnp-default-deny-egress.yaml")
 			ingressDenyAllPolicy = helpers.ManifestGet(kubectl.BasePath(), "ccnp-default-deny-ingress.yaml")

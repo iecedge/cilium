@@ -291,6 +291,42 @@ Annotations:
    upgrade. Connections should successfully re-establish without requiring
    clients to reconnect.
 
+.. _1.8_upgrade_notes:
+
+1.8 Upgrade Notes
+-----------------
+
+.. _1.8_required_changes:
+
+IMPORTANT: Changes required before upgrading to 1.8.0
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. warning::
+
+   Do not upgrade to 1.8.0 before reading the following section and completing
+   the required steps.
+
+* While operating in direct-routing mode (``--tunnel=disabled``), traffic with
+  a destination address matching a particular CIDR is automatically excluded
+  from being masqueraded. So far, this CIDR consisted of
+  ``<alloc-cidr>/<size>`` where the size could be set with the option
+  ``--ipv4-cluster-cidr-mask-size``. This was not always desirable and
+  limiting, therefore Cilium 1.6 had already introduced the option
+  ``--native-routing-cidr`` allowing to explicitly specify the CIDR for native
+  routing. With Cilium 1.8, the option ``--ipv4-cluster-cidr-mask-size`` is
+  being deprecated and all users must use the option ``--native-routing-cidr``
+  instead.
+
+  .. note:: The ENI IPAM mode automatically derives the native routing CIDR so
+            no action is required.
+
+Deprecated options
+~~~~~~~~~~~~~~~~~~
+
+* ``keep-bpf-templates``: This option no longer has any effect due to the BPF
+  assets not being compiled into the cilium-agent binary anymore. The option is
+  deprecated and will be removed in v1.9.
+
 .. _1.7_upgrade_notes:
 
 1.7 Upgrade Notes
@@ -309,22 +345,40 @@ IMPORTANT: Changes required before upgrading to 1.7.0
 * Cilium has bumped the minimal kubernetes version supported to v1.11.0.
 
 * The ``kubernetes.io/cluster-service`` label has been removed from the Cilium
-  `DaemonSet` selector. Existing users must remove this label from their
-  `DaemonSet` specification to safely upgrade. If action is not taken to make
-  the selector labels consistent with the upgraded YAMLs, then the new
-  `DaemonSet` YAML which is created during upgrade will fail to apply.
+  `DaemonSet` selector. Existing users must either choose to keep this label in
+  `DaemonSet` specification to safely upgrade or re-create the Cilium `DaemonSet`
+  without the deprecated label. It is advisable to keep the label when doing
+  an upgrade from ``v1.6.x`` to ``v1.7.x`` in the event of having to do a
+  downgrade. The removal of this label should be done after a successful
+  upgrade.
 
-  *Highly recommended:*
+  The helm option ``agent.keepDeprecatedLabels=true`` will keep the
+  ``kubernetes.io/cluster-service`` label in the new `DaemonSet`:
 
-  The below instructions will remove the ``kubernetes.io/cluster-service``
-  label from the existing `DaemonSet` in the cluster without making any other
-  changes.
+.. tabs::
+  .. group-tab:: kubectl
 
-  .. code:: bash
+    .. parsed-literal::
 
-     $ kubectl get ds -n kube-system cilium -o yaml > cilium-ds.yaml
-     $ sed -i '/kubernetes.io\/cluster-service: "true"/d' cilium-ds.yaml
-     $ kubectl apply -f cilium-ds.yaml --force
+      helm template cilium \
+      --namespace=kube-system \
+      ...
+      --set agent.keepDeprecatedLabels=true \
+      ...
+      > cilium.yaml
+      kubectl apply -f cilium.yaml
+
+  .. group-tab:: Helm
+
+    .. parsed-literal::
+
+      helm upgrade cilium --namespace=kube-system \
+      --set agent.keepDeprecatedLabels=true
+
+
+  Trying to upgrade Cilium without this option might result in the following
+  error: ``The DaemonSet "cilium" is invalid: spec.selector: Invalid value: ...: field is immutable``
+
 
 * If ``kvstore`` is setup with ``etcd`` **and** TLS is enabled, the field name
   ``ca-file`` will have its usage deprecated and will be removed in Cilium v1.8.0.
@@ -406,11 +460,23 @@ New ConfigMap Options
     modify those policy rules to explicitly allow the entity ``remote-node``
     and then enable this flag as you upgrade.
 
+  * ``kube-proxy-replacement`` has been added to control which features should
+    be enabled for the kube-proxy BPF replacement. The option is set to
+    ``probe`` by default for new deployments when generated via Helm. This
+    makes cilium-agent to probe for each feature support in a kernel, and
+    to enable only supported features. When the option is not set via Helm,
+    cilium-agent defaults to ``partial``. This makes ``cilium-agent`` to
+    enable only those features which user has explicitly enabled in their
+    ConfigMap. See :ref:`kubeproxy-free` for more option values.
+
+    For users who previously were running with ``nodePort.enabled=true`` it is
+    recommended to set the option to ``strict`` before upgrading.
+
 Removed options
 ~~~~~~~~~~~~~~~~~~
 
 * ``lb``: The ``--lb`` feature has been removed. If you need load-balancing on
-  a particular device, consider using :ref:`nodeport`.
+  a particular device, consider using :ref:`kubeproxy-free`.
 
 * ``docker`` and ``e``: This flags has been removed as Cilium no longer requires
   container runtime integrations to manage containers' networks.

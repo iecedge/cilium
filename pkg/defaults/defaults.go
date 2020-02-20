@@ -132,8 +132,8 @@ const (
 	// EnableL7Proxy is the default value for L7 proxy enablement
 	EnableL7Proxy = true
 
-	// EnableK8sExternalIPs is the default value for k8s externalIPs feature.
-	EnableK8sExternalIPs = true
+	// EnableExternalIPs is the default value for k8s service with externalIPs feature.
+	EnableExternalIPs = true
 
 	// K8sEnableEndpointSlice is the default value for k8s EndpointSlice feature.
 	K8sEnableEndpointSlice = true
@@ -346,4 +346,8 @@ const (
 
 	// NodePortMode is the default value for option.NodePortMode
 	NodePortMode = "snat"
+
+	// IPAMExpiration is the timeout after which an IP subject to expiratio
+	// is being released again if no endpoint is being created in time.
+	IPAMExpiration = 3 * time.Minute
 )

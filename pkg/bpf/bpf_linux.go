@@ -21,6 +21,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"syscall"
 	"unsafe"
 
@@ -68,6 +69,7 @@ func CreateMap(mapType int, keySize, valueSize, maxEntries, flags, innerID uint3
 		uintptr(unsafe.Pointer(&uba)),
 		unsafe.Sizeof(uba),
 	)
+	runtime.KeepAlive(&uba)
 	if option.Config.MetricsConfig.BPFSyscallDurationEnabled {
 		metrics.BPFSyscallDuration.WithLabelValues(metricOpCreate, metrics.Errno2Outcome(err)).Observe(duration.End(err == 0).Total().Seconds())
 	}
@@ -98,7 +100,7 @@ type bpfAttrMapOpElem struct {
 // bpf.BPF_ANY to create new element or update existing;
 // bpf.BPF_NOEXIST to create new element if it didn't exist;
 // bpf.BPF_EXIST to update existing element.
-func UpdateElementFromPointers(fd int, structPtr, sizeOfStruct uintptr) error {
+func UpdateElementFromPointers(fd int, structPtr unsafe.Pointer, sizeOfStruct uintptr) error {
 	var duration *spanstat.SpanStat
 	if option.Config.MetricsConfig.BPFSyscallDurationEnabled {
 		duration = spanstat.Start()
@@ -106,9 +108,10 @@ func UpdateElementFromPointers(fd int, structPtr, sizeOfStruct uintptr) error {
 	ret, _, err := unix.Syscall(
 		unix.SYS_BPF,
 		BPF_MAP_UPDATE_ELEM,
-		structPtr,
+		uintptr(structPtr),
 		sizeOfStruct,
 	)
+	runtime.KeepAlive(structPtr)
 	if option.Config.MetricsConfig.BPFSyscallDurationEnabled {
 		metrics.BPFSyscallDuration.WithLabelValues(metricOpUpdate, metrics.Errno2Outcome(err)).Observe(duration.End(err == 0).Total().Seconds())
 	}
@@ -134,12 +137,15 @@ func UpdateElement(fd int, key, value unsafe.Pointer, flags uint64) error {
 		flags: uint64(flags),
 	}
 
-	return UpdateElementFromPointers(fd, uintptr(unsafe.Pointer(&uba)), unsafe.Sizeof(uba))
+	ret := UpdateElementFromPointers(fd, unsafe.Pointer(&uba), unsafe.Sizeof(uba))
+	runtime.KeepAlive(key)
+	runtime.KeepAlive(value)
+	return ret
 }
 
 // LookupElement looks up for the map value stored in fd with the given key. The value
 // is stored in the value unsafe.Pointer.
-func LookupElementFromPointers(fd int, structPtr, sizeOfStruct uintptr) error {
+func LookupElementFromPointers(fd int, structPtr unsafe.Pointer, sizeOfStruct uintptr) error {
 	var duration *spanstat.SpanStat
 	if option.Config.MetricsConfig.BPFSyscallDurationEnabled {
 		duration = spanstat.Start()
@@ -147,9 +153,10 @@ func LookupElementFromPointers(fd int, structPtr, sizeOfStruct uintptr) error {
 	ret, _, err := unix.Syscall(
 		unix.SYS_BPF,
 		BPF_MAP_LOOKUP_ELEM,
-		structPtr,
+		uintptr(structPtr),
 		sizeOfStruct,
 	)
+	runtime.KeepAlive(structPtr)
 	if option.Config.MetricsConfig.BPFSyscallDurationEnabled {
 		metrics.BPFSyscallDuration.WithLabelValues(metricOpLookup, metrics.Errno2Outcome(err)).Observe(duration.End(err == 0).Total().Seconds())
 	}
@@ -171,7 +178,10 @@ func LookupElement(fd int, key, value unsafe.Pointer) error {
 		value: uint64(uintptr(value)),
 	}
 
-	return LookupElementFromPointers(fd, uintptr(unsafe.Pointer(&uba)), unsafe.Sizeof(uba))
+	ret := LookupElementFromPointers(fd, unsafe.Pointer(&uba), unsafe.Sizeof(uba))
+	runtime.KeepAlive(key)
+	runtime.KeepAlive(value)
+	return ret
 }
 
 func deleteElement(fd int, key unsafe.Pointer) (uintptr, syscall.Errno) {
@@ -189,6 +199,8 @@ func deleteElement(fd int, key unsafe.Pointer) (uintptr, syscall.Errno) {
 		uintptr(unsafe.Pointer(&uba)),
 		unsafe.Sizeof(uba),
 	)
+	runtime.KeepAlive(key)
+	runtime.KeepAlive(&uba)
 	if option.Config.MetricsConfig.BPFSyscallDurationEnabled {
 		metrics.BPFSyscallDuration.WithLabelValues(metricOpDelete, metrics.Errno2Outcome(err)).Observe(duration.End(err == 0).Total().Seconds())
 	}
@@ -209,8 +221,7 @@ func DeleteElement(fd int, key unsafe.Pointer) error {
 
 // GetNextKeyFromPointers stores, in nextKey, the next key after the key of the
 // map in fd. When there are no more keys, io.EOF is returned.
-func GetNextKeyFromPointers(fd int, structPtr, sizeOfStruct uintptr) error {
-
+func GetNextKeyFromPointers(fd int, structPtr unsafe.Pointer, sizeOfStruct uintptr) error {
 	var duration *spanstat.SpanStat
 	if option.Config.MetricsConfig.BPFSyscallDurationEnabled {
 		duration = spanstat.Start()
@@ -218,9 +229,10 @@ func GetNextKeyFromPointers(fd int, structPtr, sizeOfStruct uintptr) error {
 	ret, _, err := unix.Syscall(
 		unix.SYS_BPF,
 		BPF_MAP_GET_NEXT_KEY,
-		structPtr,
+		uintptr(structPtr),
 		sizeOfStruct,
 	)
+	runtime.KeepAlive(structPtr)
 	if option.Config.MetricsConfig.BPFSyscallDurationEnabled {
 		metrics.BPFSyscallDuration.WithLabelValues(metricOpGetNextKey, metrics.Errno2Outcome(err)).Observe(duration.End(err == 0).Total().Seconds())
 	}
@@ -247,7 +259,10 @@ func GetNextKey(fd int, key, nextKey unsafe.Pointer) error {
 		value: uint64(uintptr(nextKey)),
 	}
 
-	return GetNextKeyFromPointers(fd, uintptr(unsafe.Pointer(&uba)), unsafe.Sizeof(uba))
+	ret := GetNextKeyFromPointers(fd, unsafe.Pointer(&uba), unsafe.Sizeof(uba))
+	runtime.KeepAlive(key)
+	runtime.KeepAlive(nextKey)
+	return ret
 }
 
 // GetFirstKey fetches the first key in the map. If there are no keys in the
@@ -259,7 +274,9 @@ func GetFirstKey(fd int, nextKey unsafe.Pointer) error {
 		value: uint64(uintptr(nextKey)),
 	}
 
-	return GetNextKeyFromPointers(fd, uintptr(unsafe.Pointer(&uba)), unsafe.Sizeof(uba))
+	ret := GetNextKeyFromPointers(fd, unsafe.Pointer(&uba), unsafe.Sizeof(uba))
+	runtime.KeepAlive(nextKey)
+	return ret
 }
 
 // This struct must be in sync with union bpf_attr's anonymous struct used by
@@ -288,6 +305,9 @@ func ObjPin(fd int, pathname string) error {
 		uintptr(unsafe.Pointer(&uba)),
 		unsafe.Sizeof(uba),
 	)
+	runtime.KeepAlive(&pathStr)
+	runtime.KeepAlive(&uba)
+
 	if option.Config.MetricsConfig.BPFSyscallDurationEnabled {
 		metrics.BPFSyscallDuration.WithLabelValues(metricOpObjPin, metrics.Errno2Outcome(err)).Observe(duration.End(err == 0).Total().Seconds())
 	}
@@ -316,6 +336,8 @@ func ObjGet(pathname string) (int, error) {
 		uintptr(unsafe.Pointer(&uba)),
 		unsafe.Sizeof(uba),
 	)
+	runtime.KeepAlive(&pathStr)
+	runtime.KeepAlive(&uba)
 	if option.Config.MetricsConfig.BPFSyscallDurationEnabled {
 		metrics.BPFSyscallDuration.WithLabelValues(metricOpObjGet, metrics.Errno2Outcome(err)).Observe(duration.End(err == 0).Total().Seconds())
 	}
@@ -353,6 +375,7 @@ func MapFdFromID(id int) (int, error) {
 		uintptr(unsafe.Pointer(&uba)),
 		unsafe.Sizeof(uba),
 	)
+	runtime.KeepAlive(&uba)
 	if option.Config.MetricsConfig.BPFSyscallDurationEnabled {
 		metrics.BPFSyscallDuration.WithLabelValues(metricOpGetFDByID, metrics.Errno2Outcome(err)).Observe(duration.End(err == 0).Total().Seconds())
 	}
@@ -541,6 +564,13 @@ type bpfAttrProg struct {
 	AttachType  uint32
 }
 
+type bpfAttachProg struct {
+	TargetFd    uint32
+	AttachFd    uint32
+	AttachType  uint32
+	AttachFlags uint32
+}
+
 // TestDummyProg loads a minimal BPF program into the kernel and probes
 // whether it succeeds in doing so. This can be used to bail out early
 // in the daemon when a given type is not supported.
@@ -574,13 +604,31 @@ func TestDummyProg(progType ProgType, attachType uint32) error {
 	fd, _, errno := unix.Syscall(unix.SYS_BPF, BPF_PROG_LOAD,
 		uintptr(unsafe.Pointer(&bpfAttr)),
 		unsafe.Sizeof(bpfAttr))
-	err = unix.Setrlimit(unix.RLIMIT_MEMLOCK, &oldLim)
+	unix.Setrlimit(unix.RLIMIT_MEMLOCK, &oldLim)
 	if errno == 0 {
-		unix.Close(int(fd))
-		if err != nil {
-			return err
+		defer unix.Close(int(fd))
+		bpfAttr := bpfAttachProg{
+			TargetFd:   uint32(os.Stdin.Fd()),
+			AttachFd:   uint32(fd),
+			AttachType: attachType,
+		}
+		// We also need to go and probe the kernel whether we can actually
+		// attach something to make sure CONFIG_CGROUP_BPF is compiled in.
+		// The behavior is that when compiled in, we'll get a EBADF via
+		// cgroup_bpf_prog_attach() -> cgroup_get_from_fd(), otherwise when
+		// compiled out, we'll get EINVAL.
+		ret, _, errno := unix.Syscall(unix.SYS_BPF, BPF_PROG_ATTACH,
+			uintptr(unsafe.Pointer(&bpfAttr)),
+			unsafe.Sizeof(bpfAttr))
+		if int(ret) < 0 && errno != syscall.EBADF {
+			return errno
 		}
 		return nil
 	}
+
+	runtime.KeepAlive(&insns)
+	runtime.KeepAlive(&license)
+	runtime.KeepAlive(&bpfAttr)
+
 	return errno
 }

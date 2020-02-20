@@ -26,7 +26,6 @@ import (
 	"path"
 	"reflect"
 	"sync"
-	"syscall"
 	"time"
 	"unsafe"
 
@@ -570,7 +569,7 @@ func (m *Map) DumpWithCallback(cb DumpCallback) error {
 		key:   uint64(uintptr(unsafe.Pointer(&key[0]))),
 		value: uint64(uintptr(unsafe.Pointer(&nextKey[0]))),
 	}
-	bpfCurrentKeyPtr := uintptr(unsafe.Pointer(&bpfCurrentKey))
+	bpfCurrentKeyPtr := unsafe.Pointer(&bpfCurrentKey)
 	bpfCurrentKeySize := unsafe.Sizeof(bpfCurrentKey)
 
 	bpfNextKey := bpfAttrMapOpElem{
@@ -579,7 +578,7 @@ func (m *Map) DumpWithCallback(cb DumpCallback) error {
 		value: uint64(uintptr(unsafe.Pointer(&value[0]))),
 	}
 
-	bpfNextKeyPtr := uintptr(unsafe.Pointer(&bpfNextKey))
+	bpfNextKeyPtr := unsafe.Pointer(&bpfNextKey)
 	bpfNextKeySize := unsafe.Sizeof(bpfNextKey)
 
 	for {
@@ -666,7 +665,7 @@ func (m *Map) DumpReliablyWithCallback(cb DumpCallback, stats *DumpStats) error 
 		key:   uint64(uintptr(unsafe.Pointer(&currentKey[0]))),
 		value: uint64(uintptr(unsafe.Pointer(&value[0]))),
 	}
-	bpfCurrentKeyPtr := uintptr(unsafe.Pointer(&bpfCurrentKey))
+	bpfCurrentKeyPtr := unsafe.Pointer(&bpfCurrentKey)
 	bpfCurrentKeySize := unsafe.Sizeof(bpfCurrentKey)
 
 	bpfNextKey := bpfAttrMapOpElem{
@@ -675,7 +674,7 @@ func (m *Map) DumpReliablyWithCallback(cb DumpCallback, stats *DumpStats) error 
 		value: uint64(uintptr(unsafe.Pointer(&nextKey[0]))),
 	}
 
-	bpfNextKeyPtr := uintptr(unsafe.Pointer(&bpfNextKey))
+	bpfNextKeyPtr := unsafe.Pointer(&bpfNextKey)
 	bpfNextKeySize := unsafe.Sizeof(bpfNextKey)
 
 	// maxLookup is an upper bound limit to prevent backtracking forever
@@ -740,6 +739,7 @@ func (m *Map) DumpReliablyWithCallback(cb DumpCallback, stats *DumpStats) error 
 		// continue from the next key
 		copy(currentKey, nextKey)
 	}
+
 	return ErrMaxLookup
 }
 
@@ -855,34 +855,25 @@ func (m *Map) deleteCacheEntry(key MapKey, err error) {
 	}
 }
 
-func (m *Map) DeleteWithErrno(key MapKey) (error, syscall.Errno) {
-	var (
-		err   error
-		errno syscall.Errno
-	)
-
+// Delete deletes the map entry corresponding to the given key.
+func (m *Map) Delete(key MapKey) error {
 	m.lock.Lock()
 	defer m.lock.Unlock()
 
+	var err error
 	defer m.deleteCacheEntry(key, err)
 
 	if err = m.Open(); err != nil {
-		return err, 0
+		return err
 	}
 
-	_, errno = deleteElement(m.fd, key.GetKeyPtr())
+	_, errno := deleteElement(m.fd, key.GetKeyPtr())
 	if option.Config.MetricsConfig.BPFMapOps {
 		metrics.BPFMapOps.WithLabelValues(m.commonName(), metricOpDelete, metrics.Errno2Outcome(errno)).Inc()
 	}
 	if errno != 0 {
-		err = fmt.Errorf("Unable to delete element from map %s: %s", m.name, errno.Error())
+		err = fmt.Errorf("unable to delete element %s from map %s: %w", key, m.name, errno)
 	}
-
-	return err, errno
-}
-
-func (m *Map) Delete(key MapKey) error {
-	err, _ := m.DeleteWithErrno(key)
 	return err
 }
 

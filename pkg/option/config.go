@@ -16,6 +16,7 @@ package option
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io/ioutil"
 	"net"
@@ -144,8 +145,8 @@ const (
 	// EnablePolicy enables policy enforcement in the agent.
 	EnablePolicy = "enable-policy"
 
-	// EnableK8sExternalIPs enables k8s external IPs feature into Cilium datapath.
-	EnableK8sExternalIPs = "enable-k8s-external-ips"
+	// EnableExternalIPs enables implementation of k8s services with externalIPs in datapath
+	EnableExternalIPs = "enable-external-ips"
 
 	// K8sEnableEndpointSlice enables the k8s EndpointSlice feature into Cilium
 	K8sEnableEndpointSlice = "enable-k8s-endpoint-slice"
@@ -223,6 +224,8 @@ const (
 	KeepConfig = "keep-config"
 
 	// KeepBPFTemplates do not restore BPF template files from binary
+	// Deprecated: This option is no longer available since cilium-agent does
+	//             not include the BPF templates anymore.
 	KeepBPFTemplates = "keep-bpf-templates"
 
 	// KVStore key-value store type
@@ -243,6 +246,10 @@ const (
 	// NodePortMode indicates in which mode NodePort implementation should run
 	// ("snat" or "dsr")
 	NodePortMode = "node-port-mode"
+
+	// KubeProxyReplacement controls how to enable kube-proxy replacement
+	// features in BPF datapath
+	KubeProxyReplacement = "kube-proxy-replacement"
 
 	// NodePortRange defines a custom range where to look up NodePort services
 	NodePortRange = "node-port-range"
@@ -755,6 +762,22 @@ const (
 
 	// NodePortMaxDefault is the maximum port to listen for NodePort requests
 	NodePortMaxDefault = 32767
+
+	// KubeProxyReplacementProbe specifies to auto-enable available features for
+	// kube-proxy replacement
+	KubeProxyReplacementProbe = "probe"
+
+	// KubeProxyReplacementPartial specifies to enable only selected kube-proxy
+	// replacement features (might panic)
+	KubeProxyReplacementPartial = "partial"
+
+	// KubeProxyReplacementStrict specifies to enable all kube-proxy replacement
+	// features (might panic)
+	KubeProxyReplacementStrict = "strict"
+
+	// KubeProxyReplacementDisabled specified to completely disable kube-proxy
+	// replacement
+	KubeProxyReplacementDisabled = "disabled"
 )
 
 // GetTunnelModes returns the list of all tunnel modes
@@ -1051,7 +1074,6 @@ type DaemonConfig struct {
 	DisableEnvoyVersionCheck      bool
 	FixedIdentityMapping          map[string]string
 	FixedIdentityMappingValidator func(val string) (string, error)
-	IPv4ClusterCIDRMaskSize       int
 	IPv4Range                     string
 	IPv6Range                     string
 	IPv4ServiceRange              string
@@ -1084,7 +1106,6 @@ type DaemonConfig struct {
 	Version                string
 	PProf                  bool
 	PrometheusServeAddr    string
-	CMDRefDir              string
 	ToFQDNsMinTTL          int
 
 	// ToFQDNsProxyPort is the user-configured global, shared, DNS listen port used
@@ -1247,8 +1268,12 @@ type DaemonConfig struct {
 	// ("snat" or "dsr")
 	NodePortMode string
 
-	// EnableK8sExternalIPs enables k8s external IPs implementation in BPF
-	EnableK8sExternalIPs bool
+	// KubeProxyReplacement controls how to enable kube-proxy replacement
+	// features in BPF datapath
+	KubeProxyReplacement string
+
+	// EnableExternalIPs enables implementation of k8s services with externalIPs in datapath
+	EnableExternalIPs bool
 
 	// K8sEnableEndpointSlice enables k8s endpoint slice feature that is used
 	// in kubernetes.
@@ -1669,11 +1694,12 @@ func (c *DaemonConfig) Populate() {
 	c.EnableEndpointHealthChecking = viper.GetBool(EnableEndpointHealthChecking)
 	c.EnableLocalNodeRoute = viper.GetBool(EnableLocalNodeRoute)
 	c.EnablePolicy = strings.ToLower(viper.GetString(EnablePolicy))
-	c.EnableK8sExternalIPs = viper.GetBool(EnableK8sExternalIPs)
+	c.EnableExternalIPs = viper.GetBool(EnableExternalIPs)
 	c.EnableL7Proxy = viper.GetBool(EnableL7Proxy)
 	c.EnableTracing = viper.GetBool(EnableTracing)
 	c.EnableNodePort = viper.GetBool(EnableNodePort)
 	c.NodePortMode = viper.GetString(NodePortMode)
+	c.KubeProxyReplacement = viper.GetString(KubeProxyReplacement)
 	c.EncryptInterface = viper.GetString(EncryptInterface)
 	c.EncryptNode = viper.GetBool(EncryptNode)
 	c.EnvoyLogPath = viper.GetString(EnvoyLog)
@@ -1684,7 +1710,6 @@ func (c *DaemonConfig) Populate() {
 	c.HTTPRequestTimeout = viper.GetInt(HTTPRequestTimeout)
 	c.HTTPRetryCount = viper.GetInt(HTTPRetryCount)
 	c.HTTPRetryTimeout = viper.GetInt(HTTPRetryTimeout)
-	c.IPv4ClusterCIDRMaskSize = viper.GetInt(IPv4ClusterCIDRMaskSize)
 	c.IdentityChangeGracePeriod = viper.GetDuration(IdentityChangeGracePeriod)
 	c.IPAM = viper.GetString(IPAM)
 	c.IPv4Range = viper.GetString(IPv4Range)
@@ -1803,22 +1828,9 @@ func (c *DaemonConfig) Populate() {
 	}
 	c.IPv6PodSubnets = subnets
 
-	nodePortRange := viper.GetStringSlice(NodePortRange)
-	if len(nodePortRange) > 0 {
-		if len(nodePortRange) != 2 {
-			log.Fatal("Unable to parse min/max port for NodePort range!")
-		}
-		c.NodePortMin, err = strconv.Atoi(nodePortRange[0])
-		if err != nil {
-			log.WithError(err).Fatal("Unable to parse min port value for NodePort range!")
-		}
-		c.NodePortMax, err = strconv.Atoi(nodePortRange[1])
-		if err != nil {
-			log.WithError(err).Fatal("Unable to parse max port value for NodePort range!")
-		}
-		if c.NodePortMax <= c.NodePortMin {
-			log.Fatal("NodePort range min port must be smaller than max port!")
-		}
+	err = c.populateNodePortRange()
+	if err != nil {
+		log.WithError(err).Fatal("NodePortRange can not be parsed.")
 	}
 
 	hostServicesProtos := viper.GetStringSlice(HostReachableServicesProtos)
@@ -1925,13 +1937,38 @@ func (c *DaemonConfig) Populate() {
 	c.K8sNamespace = viper.GetString(K8sNamespaceName)
 	c.MaxControllerInterval = viper.GetInt(MaxCtrlIntervalName)
 	c.SidecarHTTPProxy = viper.GetBool(SidecarHTTPProxy)
-	c.CMDRefDir = viper.GetString(CMDRef)
 	c.PolicyQueueSize = sanitizeIntParam(PolicyQueueSize, defaults.PolicyQueueSize)
 	c.EndpointQueueSize = sanitizeIntParam(EndpointQueueSize, defaults.EndpointQueueSize)
 	c.SelectiveRegeneration = viper.GetBool(SelectiveRegeneration)
 	c.SkipCRDCreation = viper.GetBool(SkipCRDCreation)
 	c.DisableCNPStatusUpdates = viper.GetBool(DisableCNPStatusUpdates)
 	c.AwsReleaseExcessIps = viper.GetBool(AwsReleaseExcessIps)
+}
+
+func (c *DaemonConfig) populateNodePortRange() error {
+	nodePortRange := viper.GetStringSlice(NodePortRange)
+	switch len(nodePortRange) {
+	case 2:
+		var err error
+
+		c.NodePortMin, err = strconv.Atoi(nodePortRange[0])
+		if err != nil {
+			return fmt.Errorf("Unable to parse min port value for NodePort range: %s", err.Error())
+		}
+		c.NodePortMax, err = strconv.Atoi(nodePortRange[1])
+		if err != nil {
+			return fmt.Errorf("Unable to parse max port value for NodePort range: %s", err.Error())
+		}
+		if c.NodePortMax <= c.NodePortMin {
+			return errors.New("NodePort range min port must be smaller than max port!")
+		}
+	case 0:
+		log.Warning("NodePort range was set but is empty.")
+	default:
+		return errors.New("Unable to parse min/max port value for NodePort range!")
+	}
+
+	return nil
 }
 
 func sanitizeIntParam(paramName string, paramDefault int) int {
