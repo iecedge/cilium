@@ -638,9 +638,6 @@ const (
 	// subject to egress masquerading
 	EgressMasqueradeInterfaces = "egress-masquerade-interfaces"
 
-	// DeprecatedEnableLegacyServices enables the legacy services
-	DeprecatedEnableLegacyServices = "enable-legacy-services"
-
 	// PolicyTriggerInterval is the amount of time between triggers of policy
 	// updates are invoked.
 	PolicyTriggerInterval = "policy-trigger-interval"
@@ -1830,7 +1827,7 @@ func (c *DaemonConfig) Populate() {
 
 	err = c.populateNodePortRange()
 	if err != nil {
-		log.WithError(err).Fatal("NodePortRange can not be parsed.")
+		log.WithError(err).Fatal("Failed to populate NodePortRange")
 	}
 
 	hostServicesProtos := viper.GetStringSlice(HostReachableServicesProtos)
@@ -1960,12 +1957,12 @@ func (c *DaemonConfig) populateNodePortRange() error {
 			return fmt.Errorf("Unable to parse max port value for NodePort range: %s", err.Error())
 		}
 		if c.NodePortMax <= c.NodePortMin {
-			return errors.New("NodePort range min port must be smaller than max port!")
+			return errors.New("NodePort range min port must be smaller than max port")
 		}
 	case 0:
 		log.Warning("NodePort range was set but is empty.")
 	default:
-		return errors.New("Unable to parse min/max port value for NodePort range!")
+		return fmt.Errorf("Unable to parse min/max port value for NodePort range: %s", NodePortRange)
 	}
 
 	return nil

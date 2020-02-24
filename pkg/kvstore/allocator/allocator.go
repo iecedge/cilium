@@ -20,7 +20,6 @@ import (
 	"path"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/cilium/cilium/pkg/allocator"
 	"github.com/cilium/cilium/pkg/idpool"
@@ -33,16 +32,6 @@ import (
 
 var (
 	log = logging.DefaultLogger.WithField(logfields.LogSubsys, "kvstorebackend")
-)
-
-const (
-	// maxAllocAttempts is the number of attempted allocation requests
-	// performed before failing.
-	maxAllocAttempts = 16
-
-	// listTimeout is the time to wait for the initial list operation to
-	// succeed when creating a new allocator
-	listTimeout = 3 * time.Minute
 )
 
 // kvstoreBackend is an implentaton of pkg/allocator.Backend. It store
@@ -103,8 +92,6 @@ type kvstoreBackend struct {
 	backend kvstore.BackendOperations
 
 	keyType allocator.AllocatorKey
-
-	ctx context.Context
 }
 
 func locklessCapability(backend kvstore.BackendOperations) bool {
@@ -140,12 +127,12 @@ func NewKVStoreBackend(basePath, suffix string, typ allocator.AllocatorKey, back
 // lockPath locks a key in the scope of an allocator
 func (k *kvstoreBackend) lockPath(ctx context.Context, key string) (*kvstore.Lock, error) {
 	suffix := strings.TrimPrefix(key, k.basePrefix)
-	return kvstore.LockPath(ctx, path.Join(k.lockPrefix, suffix))
+	return kvstore.LockPath(ctx, k.backend, path.Join(k.lockPrefix, suffix))
 }
 
 // DeleteAllKeys will delete all keys
 func (k *kvstoreBackend) DeleteAllKeys(ctx context.Context) {
-	kvstore.Client().DeletePrefix(ctx, k.basePrefix)
+	k.backend.DeletePrefix(ctx, k.basePrefix)
 }
 
 // AllocateID allocates a key->ID mapping in the kvstore.
@@ -198,7 +185,7 @@ func (k *kvstoreBackend) createValueNodeKey(ctx context.Context, key string, new
 // Lock locks a key in the scope of an allocator
 func (k *kvstoreBackend) lock(ctx context.Context, key string) (*kvstore.Lock, error) {
 	suffix := strings.TrimPrefix(key, k.basePrefix)
-	return kvstore.LockPath(ctx, path.Join(k.lockPrefix, suffix))
+	return kvstore.LockPath(ctx, k.backend, path.Join(k.lockPrefix, suffix))
 }
 
 // Lock locks a key in the scope of an allocator

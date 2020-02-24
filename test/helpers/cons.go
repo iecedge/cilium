@@ -176,8 +176,8 @@ const (
 
 	// CiliumStableHelmChartVersion should be the chart version that points
 	// to the v1.X branch
-	CiliumStableHelmChartVersion = "1.6-dev"
-	CiliumStableVersion          = "v1.6"
+	CiliumStableHelmChartVersion = "1.7-dev"
+	CiliumStableVersion          = "v1.7"
 	CiliumLatestHelmChartVersion = "1.7.90"
 	CiliumLatestImageVersion     = "latest"
 
@@ -200,11 +200,12 @@ const (
 
 	// Logs messages that should not be in the cilium logs.
 	panicMessage      = "panic:"
-	deadLockHeader    = "POTENTIAL DEADLOCK:"       // from github.com/sasha-s/go-deadlock/deadlock.go:header
-	segmentationFault = "segmentation fault"        // from https://github.com/cilium/cilium/issues/3233
-	NACKreceived      = "NACK received for version" // from https://github.com/cilium/cilium/issues/4003
-	RunInitFailed     = "JoinEP: "                  // from https://github.com/cilium/cilium/pull/5052
-	sizeMismatch      = "size mismatch for BPF map" // from https://github.com/cilium/cilium/issues/7851
+	deadLockHeader    = "POTENTIAL DEADLOCK:"                  // from github.com/sasha-s/go-deadlock/deadlock.go:header
+	segmentationFault = "segmentation fault"                   // from https://github.com/cilium/cilium/issues/3233
+	NACKreceived      = "NACK received for version"            // from https://github.com/cilium/cilium/issues/4003
+	RunInitFailed     = "JoinEP: "                             // from https://github.com/cilium/cilium/pull/5052
+	sizeMismatch      = "size mismatch for BPF map"            // from https://github.com/cilium/cilium/issues/7851
+	emptyBPFInitArg   = "empty argument passed to bpf/init.sh" // from https://github.com/cilium/cilium/issues/10228
 
 	// HelmTemplate is the location of the Helm templates to install Cilium
 	HelmTemplate = "../install/kubernetes/cilium"
@@ -229,7 +230,7 @@ const (
 
 // NightlyStableUpgradesFrom maps the cilium image versions to the helm charts
 // that will be used to run update tests in the Nightly test.
-var NightlyStableUpgradesFrom = map[string]string{"1.6": "1.6-dev", "1.7": "1.7-dev"}
+var NightlyStableUpgradesFrom = map[string]string{"v1.6": "1.6-dev", "v1.7": "1.7-dev"}
 
 var (
 	IsCiliumV1_5 = versioncheck.MustCompile(">=1.4.90 <1.6.0")
@@ -257,6 +258,7 @@ var badLogMessages = map[string][]string{
 	NACKreceived:      nil,
 	RunInitFailed:     {"signal: terminated", "signal: killed"},
 	sizeMismatch:      nil,
+	emptyBPFInitArg:   nil,
 }
 
 var ciliumCLICommands = map[string]string{

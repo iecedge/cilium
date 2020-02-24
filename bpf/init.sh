@@ -56,6 +56,8 @@ rm $RUNDIR/encap.state 2> /dev/null || true
 # This directory was created by the daemon and contains the per container header file
 DIR="$PWD/globals"
 
+MACHINE=$(uname -m)
+
 function setup_dev()
 {
 	local -r NAME=$1
@@ -269,6 +271,7 @@ function bpf_compile()
 
 	clang -O2 -g -target bpf -emit-llvm				\
 	      -Wno-address-of-packed-member -Wno-unknown-warning-option	\
+	      -I/usr/include/${MACHINE}-linux-gnu                       \
 	      -I. -I$DIR -I$LIB -I$LIB/include				\
 	      -D__NR_CPUS__=$(nproc)					\
 	      -DENABLE_ARP_RESPONDER					\
@@ -456,8 +459,8 @@ case "${MODE}" in
 		CILIUM_IDX=$(cat /sys/class/net/${HOST_DEV1}/ifindex)
 		echo "#define CILIUM_IFINDEX $CILIUM_IDX" >> $RUNDIR/globals/node_config.h
 
-		CILIUM_EPHERMERAL_MIN=$(cat /proc/sys/net/ipv4/ip_local_port_range | awk '{print $1}')
-		echo "#define EPHERMERAL_MIN $CILIUM_EPHERMERAL_MIN" >> $RUNDIR/globals/node_config.h
+		CILIUM_EPHEMERAL_MIN=$(cat /proc/sys/net/ipv4/ip_local_port_range | awk '{print $1}')
+		echo "#define EPHEMERAL_MIN $CILIUM_EPHEMERAL_MIN" >> $RUNDIR/globals/node_config.h
 
 		if [ "$NODE_PORT" = "true" ]; then
 			sed -i '/^#.*NATIVE_DEV_IFINDEX.*$/d' $RUNDIR/globals/node_config.h
@@ -529,7 +532,7 @@ else
 fi
 
 if [ "$MODE" = "direct" ] || [ "$MODE" = "ipvlan" ] || [ "$MODE" = "routed" ] || [ "$NODE_PORT" = "true" ] ; then
-	if [ -z "$NATIVE_DEV" ]; then
+	if [ "$NATIVE_DEV" == "<nil>" ]; then
 		echo "No device specified for $MODE mode, ignoring..."
 	else
 		if [ "$IP6_HOST" != "<nil>" ]; then
@@ -631,7 +634,7 @@ bpf_load $HOST_DEV1 "" "ingress" bpf_hostdev_ingress.c bpf_hostdev_ingress.o to-
 # bpf_ipsec.o is also needed by proxy redirects, so we load it unconditionally
 bpf_load $HOST_DEV2 "" "ingress" bpf_ipsec.c bpf_ipsec.o from-netdev $CALLS_MAP
 if [ "$IPSEC" == "true" ]; then
-	if [ $ENCRYPT_DEV != "" ]; then
+	if [ "$ENCRYPT_DEV" != "<nil>" ]; then
 		bpf_load $ENCRYPT_DEV "" "ingress" bpf_network.c bpf_network.o from-network $CALLS_MAP
 	fi
 fi
@@ -639,7 +642,7 @@ if [ "$HOST_DEV1" != "$HOST_DEV2" ]; then
 	bpf_unload $HOST_DEV2 "egress"
 fi
 
-if [ -n "$XDP_DEV" ]; then
+if [ "$XDP_DEV" != "<nil>" ]; then
 	CIDR_MAP="cilium_cidr_v*"
 	COPTS=""
 	xdp_load $XDP_DEV $XDP_MODE "$COPTS" bpf_xdp.c bpf_xdp.o from-netdev $CIDR_MAP

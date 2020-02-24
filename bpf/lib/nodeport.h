@@ -754,8 +754,8 @@ static __always_inline int handle_dsr_v4(struct __sk_buff *skb, bool *dsr)
 	// Check whether IPv4 header contains a 64-bit option (IPv4 header
 	// w/o option (5 x 32-bit words) + the DSR option (2 x 32-bit words))
 	if (ip4->ihl == 0x7) {
-		uint32_t opt1 = 0;
-		uint32_t opt2 = 0;
+		__u32 opt1 = 0;
+		__u32 opt2 = 0;
 
 		if (skb_load_bytes(skb, ETH_HLEN + sizeof(struct iphdr),
 				   &opt1, sizeof(opt1)) < 0)
@@ -1268,7 +1268,7 @@ static __always_inline int nodeport_nat_rev(struct __sk_buff *skb,
 		build_bug_on(!(NODEPORT_PORT_MIN_NAT < NODEPORT_PORT_MAX_NAT));
 		build_bug_on(!(NODEPORT_PORT_MIN     < NODEPORT_PORT_MAX));
 		build_bug_on(!(NODEPORT_PORT_MAX     < NODEPORT_PORT_MIN_NAT));
-		build_bug_on(!(NODEPORT_PORT_MAX     < EPHERMERAL_MIN));
+		build_bug_on(!(NODEPORT_PORT_MAX     < EPHEMERAL_MIN));
 		break;
 	}
 	return TC_ACT_OK;

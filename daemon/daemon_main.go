@@ -23,6 +23,7 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -58,6 +59,7 @@ import (
 	"github.com/cilium/cilium/pkg/policy"
 	"github.com/cilium/cilium/pkg/pprof"
 	"github.com/cilium/cilium/pkg/probe"
+	"github.com/cilium/cilium/pkg/sysctl"
 	"github.com/cilium/cilium/pkg/version"
 
 	"github.com/go-openapi/loads"
@@ -327,10 +329,6 @@ func init() {
 
 	flags.StringSlice(option.HostReachableServicesProtos, []string{option.HostServicesTCP, option.HostServicesUDP}, "Only enable reachability of services for host applications for specific protocols")
 	option.BindEnv(option.HostReachableServicesProtos)
-
-	flags.Bool(option.DeprecatedEnableLegacyServices, false, "Enable legacy (prior-v1.5) services")
-	flags.MarkDeprecated(option.DeprecatedEnableLegacyServices, "this option is deprecated as of v1.6")
-	option.BindEnv(option.DeprecatedEnableLegacyServices)
 
 	flags.Bool(option.EnableAutoDirectRoutingName, defaults.EnableAutoDirectRouting, "Enable automatic L2 routing between nodes")
 	option.BindEnv(option.EnableAutoDirectRoutingName)
@@ -1499,6 +1497,16 @@ func initKubeProxyReplacementOptions() {
 				option.Config.EnableExternalIPs = false
 			}
 		}
+
+		if err := checkNodePortAndEphemeralPortRanges(); err != nil {
+			if strict {
+				log.Fatal(err)
+			} else {
+				log.Warn(fmt.Sprintf("%s Disabling the feature.", err))
+				option.Config.EnableNodePort = false
+				option.Config.EnableExternalIPs = false
+			}
+		}
 	}
 
 	if option.Config.EnableNodePort && option.Config.Device == "undefined" {
@@ -1557,4 +1565,26 @@ func initKubeProxyReplacementOptions() {
 	if !option.Config.EnableNodePort {
 		option.Config.EnableExternalIPs = false
 	}
+}
+
+func checkNodePortAndEphemeralPortRanges() error {
+	val, err := sysctl.Read("net.ipv4.ip_local_port_range")
+	if err != nil {
+		return fmt.Errorf("Unable to read net.ipv4.ip_local_port_range")
+	}
+	ephemeralPortRange := strings.Split(val, "\t")
+	if len(ephemeralPortRange) != 2 {
+		return fmt.Errorf("Invalid ephemeral port range: %s", val)
+	}
+	ephemeralPortMin, err := strconv.Atoi(ephemeralPortRange[0])
+	if err != nil {
+		return fmt.Errorf("Unable to parse min port value %s for ephemeral range", ephemeralPortRange[0])
+	}
+	if !(option.Config.NodePortMax < ephemeralPortMin) {
+		msg := `NodePort range (%d-%d) max port must be smaller than ephemeral range (%s-%s) min port. ` +
+			`Adjust ephemeral range port with "sysctl -w net.ipv4.ip_local_port_range='MIN MAX'".`
+		return fmt.Errorf(msg, option.Config.NodePortMin, option.Config.NodePortMax,
+			ephemeralPortRange[0], ephemeralPortRange[1])
+	}
+	return nil
 }
